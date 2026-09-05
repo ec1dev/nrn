@@ -11,7 +11,11 @@ class _HeadlessImports(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname in {"hoc", "nrn", "_neuron_section"} or (
             fullname.startswith("neuron.")
-            and fullname not in {"neuron._myneuron_interface", "neuron._config_params"}
+            and fullname not in {
+                "neuron._myneuron_interface",
+                "neuron._config_params",
+                "neuron.gui",
+            }
         ):
             raise ImportError(
                 f"{fullname} is not supported by the myneuron h/HOC beta; "
