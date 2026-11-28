@@ -58,7 +58,9 @@ from .api import (
     _nrn_section_rallbranch_get,
     _nrn_section_rallbranch_set,
     _nrn_section_sibling,
+    _nrn_object_ref,
     _nrn_segment_mechanisms,
+    _nrn_segment_point_processes,
     _nrn_segment_node_index,
     _nrn_symbol,
     _nrn_symbol_array_length,
@@ -1011,6 +1013,15 @@ class Segment(SEGMENT_BASE):
         """
         if not 0.0 < self._x < 1.0:  # NEURON finds the node with node_exact
             _ensure_topology(self._sec._sec, self._x)
+        if _nrn_segment_point_processes is not None:  # one C call, as NEURON's loop
+            sec = self._sec._sec
+            self._sec._check_alive()
+            n = _nrn_segment_point_processes(sec, self._x, None, 0)
+            found = (ctypes.c_void_p * n)()
+            _nrn_segment_point_processes(sec, self._x, found, n)
+            for obj in found:
+                _nrn_object_ref(obj)  # each wrapper releases its own reference
+            return [_utils._wrap_owned_object(obj) for obj in found]
         return self._point_processes()
 
     def _point_processes(self):
@@ -2284,14 +2295,12 @@ class Section(SECTION_BASE):
             cell = _PACKAGE._n.section_owner(sec=self)
         return cell
 
-    @property
-    def L(self):
+    def _get_L(self):
         self._check_alive()
 
         return _nrn_section_length_get(self._sec)
 
-    @L.setter
-    def L(self, value):
+    def _set_L(self, value):
         value = _to_double(value, ValueError)
         self._check_alive()
 
@@ -2300,6 +2309,16 @@ class Section(SECTION_BASE):
         if not _is_finite(value) or value <= 0:
             raise ValueError("L must be > 0.")
         _nrn_section_length_set(self._sec, value)
+
+    def _del_L(self):
+        raise AttributeError(
+            f"property 'L' of {type(self).__name__!r} object has no deleter"
+        )
+
+    # The core's getter (nrnpy_fast.cpp) calls the methods above for anything
+    # but the length of a section that exists, and for every write.
+    if not hasattr(SECTION_BASE, "L"):
+        L = property(_get_L, _set_L)
 
     @property
     def Ra(self):

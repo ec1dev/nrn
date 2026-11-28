@@ -1071,6 +1071,18 @@ _nrn_segment_node_index = _bind(
 # A node's mechanisms in the order of its property list, the order NEURON's
 # `for mech in seg` follows. Optional: the pinned core lacks it; without it a
 # segment yields its mechanisms in registration order.
+# The point processes of a node, newest first (borrowed Object*), or None on a
+# core without it.
+_nrn_segment_point_processes = getattr(libnrniv, "nrn_segment_point_processes", None)
+if _nrn_segment_point_processes is not None:
+    _nrn_segment_point_processes.argtypes = [
+        Section,
+        ctypes.c_double,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_int,
+    ]
+    _nrn_segment_point_processes.restype = ctypes.c_int
+
 _nrn_segment_mechanisms = getattr(libnrniv, "nrn_segment_mechanisms", None)
 if _nrn_segment_mechanisms is not None:
     _nrn_segment_mechanisms.argtypes = [

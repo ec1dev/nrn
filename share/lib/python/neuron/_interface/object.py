@@ -2060,8 +2060,12 @@ class Vector(Object, *_VECTOR_BASES):
             _copy_into_vector(self, values)
         return self
 
-    def __len__(self):
+    def _len(self):
         return _nrn_vector_capacity(self._obj)
+
+    # The core's length of an exact Vector, which calls _len for anything else
+    # (nrnpy_fast.cpp).
+    __len__ = _len if not hasattr(VECTOR_BASE, "__len__") else VECTOR_BASE.__len__
 
     # --- Arithmetic (numeric protocol) ---
     # As legacy NEURON's nrnpy_vec_math (9.0's neuron/__init__.py), called
