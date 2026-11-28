@@ -2,14 +2,18 @@
 
 #include "hocdec.h"
 #include "nrnpy.h"
+#include "oc_ansi.h"
 
 
 extern Object* nrn_get_gui_redirect_obj();
 
 
+// A constructor in Python: the object it gave is the C++ object of the HOC object, which keeps it
+// until its destructor (TRY_GUI_REDIRECT_NO_RETURN("~name", v)) has given it to Python too.
 #define TRY_GUI_REDIRECT_OBJ(name, obj)                                                \
     if (auto* const ngh_result =                                                       \
             neuron::python::methods.try_gui_helper(name, static_cast<Object*>(obj))) { \
+        hoc_obj_ref(*ngh_result);                                                      \
         return static_cast<void*>(*ngh_result);                                        \
     }
 
@@ -41,6 +45,7 @@ extern Object* nrn_get_gui_redirect_obj();
     if (auto* const ngh_result =                                                     \
             neuron::python::methods.try_gui_helper(name, static_cast<Object*>(obj)); \
         ngh_result) {                                                                \
+        hoc_obj_unref(static_cast<Object*>(obj));                                    \
         return;                                                                      \
     }
 
