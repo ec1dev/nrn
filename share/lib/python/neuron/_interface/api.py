@@ -442,18 +442,14 @@ def _bump_model_epoch():
 
 
 if CALLS_PYTHON:
-    nrn_python_hook_set = _bind(
-        "nrn_python_hook_set", ctypes.c_int, ctypes.c_char_p, ctypes.py_object
-    )
     # A PythonObject with one reference, the caller's.
     _new_python_object = _bind(
         "nrn_python_object_new", ctypes.c_void_p, ctypes.py_object
     )
-    # The Python value of a HOC object.
+    # What a PythonObject holds (the wrappers of other objects are this module's).
     _python_object_get = _bind(
         "nrn_python_object_get", ctypes.py_object, ctypes.c_void_p
     )
-    _python_error_take = _bind("nrn_python_error_take", ctypes.py_object)
     # The base classes of the wrappers: core reads and makes instances itself.
     _python_type = _bind("nrn_python_type", ctypes.py_object, ctypes.c_char_p)
     OBJECT_BASE = _python_type(b"object")
@@ -474,7 +470,6 @@ if CALLS_PYTHON:
         "nrn_str_assign", None, ctypes.POINTER(ctypes.c_void_p), ctypes.c_char_p
     )
 else:
-    nrn_python_hook_set = None
     OBJECT_BASE = _released_base.OBJECT_BASE
     SECTION_BASE = _released_base.SECTION_BASE
     SEGMENT_BASE = _released_base.SEGMENT_BASE
@@ -511,7 +506,9 @@ PENDING_CALLBACKS = []
 def raise_callback_error():
     """Raise the Python exception that caused the HOC error, if one did."""
     if CALLS_PYTHON:
-        exc = _python_error_take()
+        from ._provider import take_exception
+
+        exc = take_exception()
         if exc is not None:
             try:
                 raise exc

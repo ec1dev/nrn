@@ -6,6 +6,7 @@ set(NRN_PYTHON_INTERFACE_FILES_LIST
     _interface/_facades.py
     _interface/_hooks.py
     _interface/_provenance.py
+    _interface/_provider.py
     _interface/_startup.py
     _interface/api.py
     _interface/gui.py

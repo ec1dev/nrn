@@ -649,11 +649,6 @@ def _wrap_owned_object(obj):
     """
     if not obj:
         return None
-    if CALLS_PYTHON:
-        try:
-            return _api._python_object_get(obj)
-        finally:
-            _api._nrn_object_unref(obj)
     try:
         name = _api._nrn_class_name(obj)
         cls = _WRAPPER_CLASSES.get(name)

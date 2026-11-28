@@ -172,7 +172,7 @@ _FAST_RANGEVARS = getattr(SEGMENT_BASE, "_fast_rangevars", None)
 # mechanism name -> {unsuffixed name -> Symbol address}, filled by mechanism.py.
 # The core clears both when KSChan renames or frees a symbol.
 _FAST_MECHANISMS = getattr(SEGMENT_BASE, "_fast_mechanisms", None)
-if _FAST_RANGEVARS is not None:
+if CALLS_PYTHON:  # the core ends the epoch in this list
     SEGMENT_BASE._fast_epoch = EPOCH
 # A Segment slot write that skips Segment._setattr. object.__setattr__ refuses
 # to bypass the core's setattro, whose own generic write this is.
