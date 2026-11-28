@@ -291,7 +291,8 @@ bool make_types() {
         "nrn._Section",
         {"_sec", "_pynative", nullptr, "_cell", "_inserted_mechs", "_inserted_mechs_epoch"},
         {{{init, reinterpret_cast<void*>(init_section)},
-          fast ? Slot{stable::tp_methods, fast::section_methods} : none}});
+          fast ? Slot{stable::tp_methods, fast::section_methods} : none,
+          fast ? Slot{stable::tp_getset, fast::section_getset} : none}});
     types.object = make_type<ObjectSlot::count, release_object, ObjectSlot::methods>(
         "hoc._Object", {"_obj", "_class_name", "_methods", "_section_cache", "_plotshape_var"});
     if (!types.object || !types.section || !types.segment) {

@@ -63,7 +63,8 @@ NRNPY_EXCEPTIONS(X)
 
 static_assert(stable::tp_clear == Py_tp_clear && stable::tp_dealloc == Py_tp_dealloc &&
               stable::tp_init == Py_tp_init && stable::tp_new == Py_tp_new &&
-              stable::tp_traverse == Py_tp_traverse && stable::tp_members == Py_tp_members);
+              stable::tp_traverse == Py_tp_traverse && stable::tp_members == Py_tp_members &&
+              stable::tp_getset == Py_tp_getset);
 static_assert(stable::tp_getattro == Py_tp_getattro && stable::tp_setattro == Py_tp_setattro &&
               stable::tp_iter == Py_tp_iter && stable::tp_iternext == Py_tp_iternext &&
               stable::tp_methods == Py_tp_methods && stable::mp_subscript == Py_mp_subscript &&
@@ -90,6 +91,12 @@ static_assert(sizeof(stable::Slot) == sizeof(PyType_Slot));
 SAME(stable::Slot, id, PyType_Slot, slot);
 SAME(stable::Slot, function, PyType_Slot, pfunc);
 static_assert(sizeof(stable::Method) == sizeof(PyMethodDef));
+SAME(stable::GetSet, name, PyGetSetDef, name);
+SAME(stable::GetSet, get, PyGetSetDef, get);
+SAME(stable::GetSet, set, PyGetSetDef, set);
+SAME(stable::GetSet, doc, PyGetSetDef, doc);
+SAME(stable::GetSet, closure, PyGetSetDef, closure);
+static_assert(sizeof(stable::GetSet) == sizeof(PyGetSetDef));
 SAME(stable::Method, name, PyMethodDef, ml_name);
 SAME(stable::Method, function, PyMethodDef, ml_meth);
 SAME(stable::Method, flags, PyMethodDef, ml_flags);

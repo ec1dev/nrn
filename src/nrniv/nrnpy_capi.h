@@ -129,6 +129,13 @@ struct Method {  // PyMethodDef
     int flags;
     const char* doc;
 };
+struct GetSet {  // PyGetSetDef
+    const char* name;
+    void* get;
+    void* set;
+    const char* doc;
+    void* closure;
+};
 struct Spec {  // PyType_Spec
     const char* name;
     int basicsize;
@@ -138,7 +145,7 @@ struct Spec {  // PyType_Spec
 };
 // Py_tp_*
 constexpr int tp_clear = 51, tp_dealloc = 52, tp_init = 60, tp_new = 65, tp_traverse = 71,
-              tp_members = 72;
+              tp_members = 72, tp_getset = 73;
 // The fast path (nrnpy_fast.cpp): Py_tp_*, Py_mp_*, METH_*
 constexpr int tp_getattro = 58, tp_setattro = 69, tp_iter = 62, tp_iternext = 63, tp_methods = 64,
               mp_subscript = 5, mp_ass_subscript = 3, mp_length = 4, sq_item = 44, sq_length = 45;

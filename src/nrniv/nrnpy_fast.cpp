@@ -47,7 +47,8 @@ struct Tables {
     // The interface's own classes: only exact instances take the fast path, so a subclass always
     // has the Python methods' behaviour (its class attributes first, then _getattr).
     PyObject *segment_class{}, *mechanism_class{}, *vector_class{};
-    PyObject *s_getattr{}, *s_setattr{}, *s_getitem{}, *s_setitem{}, *s_len{}, *zero{};
+    PyObject *s_getattr{}, *s_setattr{}, *s_getitem{}, *s_setitem{}, *s_len{}, *s_get_L{},
+        *s_set_L{}, *s_del_L{}, *zero{};
 } t;
 
 /// Forget every name when KSChan renamed or freed a symbol since the last look.
@@ -346,6 +347,22 @@ PyObject* section_segments(PyObject* self, PyObject*) {
     return it;
 }
 
+// ---- sec.L: the length of a section that exists; anything else is the interface's _get_L (which
+// raises NEURON's error), and every write its _set_L.
+
+PyObject* section_length(PyObject* self, void*) {
+    Section* const sec = section_of(self);
+    if (sec && nrn_section_is_active(sec)) {
+        return py.PyFloat_FromDouble(nrn_section_length_get(sec));
+    }
+    return py.PyObject_CallMethodObjArgs(self, t.s_get_L, nullptr);
+}
+
+int section_length_set(PyObject* self, PyObject* value, void*) {
+    return status(value ? py.PyObject_CallMethodObjArgs(self, t.s_set_L, value, nullptr)
+                        : py.PyObject_CallMethodObjArgs(self, t.s_del_L, nullptr));
+}
+
 // ---- Vector elements
 
 cTemplate* vector_template{};
@@ -482,6 +499,13 @@ void vec_apply(IvocVect* vec, Object* o, int start, int end) {
 
 }  // namespace
 
+stable::GetSet section_getset[]{{"L",
+                                 reinterpret_cast<void*>(section_length),
+                                 reinterpret_cast<void*>(section_length_set),
+                                 nullptr,
+                                 nullptr},
+                                {nullptr, nullptr, nullptr, nullptr, nullptr}};
+
 stable::Method section_methods[]{
     {"_segments", reinterpret_cast<void*>(section_segments), stable::meth_noargs, nullptr},
     {nullptr, nullptr, 0, nullptr}};
@@ -535,6 +559,9 @@ bool make_types() {
     t.s_getitem = py.PyUnicode_InternFromString("_getitem");
     t.s_setitem = py.PyUnicode_InternFromString("_setitem");
     t.s_len = py.PyUnicode_InternFromString("_len");
+    t.s_get_L = py.PyUnicode_InternFromString("_get_L");
+    t.s_set_L = py.PyUnicode_InternFromString("_set_L");
+    t.s_del_L = py.PyUnicode_InternFromString("_del_L");
     t.zero = py.PyLong_FromLongLong(0);
     t.rangevars = table("_fast_rangevars");
     t.mechanisms = table("_fast_mechanisms");
@@ -566,8 +593,9 @@ bool make_types() {
     static stable::Spec vector_spec{
         "hoc._Vector", 0, 0, static_cast<unsigned>(stable::tpflags_basetype), vector_slots};
     types.vector = py.PyType_FromSpecWithBases(&vector_spec, types.object);
-    return t.s_getattr && t.s_setattr && t.s_getitem && t.s_setitem && t.s_len && t.zero &&
-           t.rangevars && t.mechanisms && iterator_type && types.vector;
+    return t.s_getattr && t.s_setattr && t.s_getitem && t.s_setitem && t.s_len && t.s_get_L &&
+           t.s_set_L && t.s_del_L && t.zero && t.rangevars && t.mechanisms && iterator_type &&
+           types.vector;
 }
 
 }  // namespace neuron::python::fast
