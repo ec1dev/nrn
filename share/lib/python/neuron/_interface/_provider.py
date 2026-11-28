@@ -1101,6 +1101,114 @@ def call_pickled(data, n, narg, out, err, size):
     return 1
 
 
+# ---- ParallelContext collectives: py_alltoall (1), py_allgather (2), py_gather (3),
+# py_broadcast (4), py_scatter (5). The pickles travel as the bytes of HOC's
+# pc.alltoall. A rank that sends nothing to another sends None.
+
+
+def _exchange(pc, chunks):
+    """Send chunks[i] (bytes) to rank i; the bytes each rank sent here."""
+    from . import n
+
+    nhost = len(chunks)
+    sent = n.Vector([len(c) for c in chunks])
+    received = n.Vector()
+    pc.alltoall(sent, n.Vector(nhost, 1), received)
+    data = n.Vector()
+    pc.alltoall(n.Vector(list(b"".join(chunks))), sent, data)
+    data = bytes(int(x) for x in data)
+    out, start = [], 0
+    for count in received:
+        out.append(data[start : start + int(count)])
+        start += int(count)
+    return out
+
+
+class _PickleFailed(Exception):
+    """pickle failed in a collective: NEURON's C++ exception "Python exception"."""
+
+
+def _dumps(value):
+    try:
+        return pickle.dumps(value)
+    except BaseException as exc:
+        raise _PickleFailed() from exc
+
+
+def _loads(data):
+    try:
+        return pickle.loads(data) if data else None
+    except BaseException as exc:
+        raise _PickleFailed() from exc
+
+
+def _items(source):
+    """The pickled items of a list, one per rank, None as nothing (PyList_GetItem)."""
+    return [b"" if x is None else _dumps(x) for x in list.__iter__(source)]
+
+
+def _collective(kind, size, source):
+    from . import n
+
+    pc = n.ParallelContext()
+    nhost, rank = int(pc.nhost()), int(pc.id())
+    if kind == 1 or (kind == 5 and rank == size):
+        if not isinstance(source, list):
+            raise _HocError("Argument must be a Python list")
+        if list.__len__(source) != nhost:
+            which = "py_alltoall" if kind == 1 else "py_scatter"
+            raise _HocError(which + " list size must be nhost")
+    if nhost == 1:  # repackaged, not pickled
+        if kind == 5:
+            return list.__getitem__(source, 0)
+        return [source] if kind in (2, 3) else source
+    if kind not in (1, 2) and not 0 <= size < nhost:
+        raise _HocError("root rank must be >= 0 and < nhost")
+    if kind == 1:
+        chunks = _items(source)
+        if size < 0:  # only the numbers of bytes to be sent and received
+            received = n.Vector()
+            pc.alltoall(n.Vector([len(c) for c in chunks]), n.Vector(nhost, 1), received)
+            return (sum(len(c) for c in chunks), int(sum(received)))
+        return [_loads(c) for c in _exchange(pc, chunks)]
+    if kind == 2:
+        return [_loads(c) for c in _exchange(pc, [_dumps(source)] * nhost)]
+    root = size
+    if kind == 3:
+        data = _dumps(source)
+        received = _exchange(pc, [data if i == root else b"" for i in range(nhost)])
+        return [_loads(c) for c in received] if rank == root else None
+    if kind == 4:
+        data = _dumps(source) if rank == root else b""
+        received = _exchange(pc, [b"" if i == root else data for i in range(nhost)])
+        return source if rank == root else _loads(received[root])
+    chunks = _items(source) if rank == root else [b""] * nhost
+    return _loads(_exchange(pc, chunks)[root])
+
+
+@_hook("collective", c_int, c_int, c_int, c_int, ctypes.POINTER(c_void_p), *ERR)
+def collective(kind, size, pointer, result, err, errsize):
+    """The argument of the HOC call is on the stack (a Pointer to a pointer
+    argument if pointer). size is the root rank for 3, 4 and 5; for 1, a negative
+    size asks for the numbers of bytes only. 3: pickling failed, as NEURON's
+    "Python exception"."""
+    try:
+        source = _gui_argument(False, pointer)
+    except BaseException as exc:
+        return _fail_hook(_strip(exc), err, errsize)
+    try:
+        value = _collective(kind, size, source)
+    except _HocError as exc:
+        _write(err, errsize, str(exc))
+        return 0
+    except _PickleFailed as exc:
+        return _pickling_failed(exc.__cause__)
+    except BaseException as exc:
+        return _fail_hook(_strip(exc), err, errsize)
+    result[0] = to_hoc(value) or None
+    return 1
+
+
 # ---- SaveState, CoreNEURON, RangeVarPlot. 2: nothing registered.
 
 _savestate = [None, None]

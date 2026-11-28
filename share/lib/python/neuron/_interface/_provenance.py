@@ -1,2 +1,2 @@
 """Exported from myneuron by scripts/export_to_nrn.py; do not edit here."""
-SOURCE_COMMIT = "e2a533aef7d75fd20c8a2f367b461261516e7ac6"
+SOURCE_COMMIT = "cb2b92a23a41d2c5a580935bce118350a39e12e4"
