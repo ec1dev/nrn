@@ -414,6 +414,26 @@ int nrn_segment_mechanisms(Section* const sec,
     return count;
 }
 
+int nrn_segment_point_processes(Section* const sec,
+                                const double x,
+                                Object** const objects,
+                                const int max) {
+    if (!sec || !nrn_section_is_active(sec) || !(x >= 0.0 && x <= 1.0)) {
+        return -1;
+    }
+    // The node's property list, head first: the newest point process first.
+    int count = 0;
+    for (Prop* p = node_exact(sec, x)->prop; p; p = p->next) {
+        if (memb_func[p->_type].is_point) {
+            if (objects && count < max) {
+                objects[count] = p->dparam[1].get<Point_process*>()->ob;
+            }
+            ++count;
+        }
+    }
+    return count;
+}
+
 double nrn_rangevar_get(Symbol* sym, Section* sec, double x) {
     return *nrn_rangepointer(sec, sym, x);
 }

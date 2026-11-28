@@ -780,6 +780,38 @@ Segments
 
         names = [mech.name() for mech in soma(0.5)]  # density mechanisms only
 
+.. c:function:: int nrn_segment_point_processes(Section* sec, double x, Object** objects, int max)
+
+    List the point processes in the node of the segment at normalized position x, in the
+    order of the node's property list: the one placed there last first, and one moved
+    there with ``loc`` goes to the front. At a node that two Sections share (the 1 end of a
+    parent, the 0 end of its child) that includes those of the other Section.
+
+    :param sec: Pointer to the Section.
+    :param x: Normalized position along Section (0.0 to 1.0).
+    :param objects: Array that receives up to ``max`` borrowed ``Object*``, or ``NULL`` to
+        only count them.
+    :param max: Size of ``objects``.
+    :returns: The number of point processes in the node, which may exceed ``max``; -1 if
+        sec is NULL or has been deleted, or if x is outside 0 to 1 or NaN. At x = 0 and
+        x = 1 the node is the end node, as for :c:func:`nrn_segment_node_index`.
+
+    **C Usage:**
+
+    .. code-block:: c
+
+        Object* pps[8];
+        int n = nrn_segment_point_processes(soma, 0.5, pps, 8);
+        for (int i = 0; i < n && i < 8; ++i) {
+            printf("%s\n", nrn_class_name(pps[i]));
+        }
+
+    **Python Equivalent:**
+
+    .. code-block:: python
+
+        soma(0.5).point_processes()
+
 .. c:function:: void nrn_rangevar_push(Symbol* sym, Section* sec, double x)
 
     Push a range variable for a Section at position x onto the NEURON stack.
