@@ -22,7 +22,6 @@ namespace neuron::python {
     X(void, PyGILState_Release, (int))                                            \
     X(PyThreadState*, PyEval_SaveThread, (void))                                  \
     X(void, PyEval_RestoreThread, (PyThreadState*))                               \
-    X(PyObject*, PyEval_GetFrame, (void))                                         \
     X(PyObject*, Py_CompileString, (const char*, const char*, int))               \
     X(PyObject*, PyEval_EvalCode, (PyObject*, PyObject*, PyObject*))              \
     X(PyObject*, PyEval_GetBuiltins, (void))                                      \
@@ -34,68 +33,38 @@ namespace neuron::python {
     X(void, PyErr_Fetch, (PyObject**, PyObject**, PyObject**))                    \
     X(void, PyErr_NormalizeException, (PyObject**, PyObject**, PyObject**))       \
     X(void, PyErr_Restore, (PyObject*, PyObject*, PyObject*))                     \
-    X(int, PyErr_GivenExceptionMatches, (PyObject*, PyObject*))                   \
     X(PyObject*, PyErr_Occurred, (void))                                          \
     X(void, PyErr_SetString, (PyObject*, const char*))                            \
     X(void, PyErr_SetObject, (PyObject*, PyObject*))                              \
     X(void, PyErr_Print, (void))                                                  \
-    X(void, PyErr_WriteUnraisable, (PyObject*))                                   \
     X(void, PyErr_Clear, (void))                                                  \
     X(int, PyException_SetTraceback, (PyObject*, PyObject*))                      \
-    X(void, PyException_SetCause, (PyObject*, PyObject*))                         \
     X(PyObject*, PyObject_CallObject, (PyObject*, PyObject*))                     \
     X(PyObject*, PyObject_CallFunctionObjArgs, (PyObject*, ...))                  \
     X(PyObject*, PyObject_GetAttr, (PyObject*, PyObject*))                        \
-    X(int, PyObject_SetAttr, (PyObject*, PyObject*, PyObject*))                   \
     X(PyObject*, PyObject_GetAttrString, (PyObject*, const char*))                \
     X(int, PyObject_SetAttrString, (PyObject*, const char*, PyObject*))           \
-    X(int, PyObject_HasAttrString, (PyObject*, const char*))                      \
-    X(PyObject*, PyObject_GetItem, (PyObject*, PyObject*))                        \
-    X(int, PyObject_SetItem, (PyObject*, PyObject*, PyObject*))                   \
-    X(PyObject*, PyObject_GetIter, (PyObject*))                                   \
-    X(PyObject*, PyObject_Str, (PyObject*))                                       \
     X(int, PyType_IsSubtype, (PyObject*, PyObject*))                              \
-    X(unsigned long, PyType_GetFlags, (PyObject*))                                \
     X(PyObject*, PyType_FromSpec, (void*))                                        \
     X(PyObject*, PyType_GenericAlloc, (PyObject*, std::ptrdiff_t))                \
     X(void, PyObject_GC_UnTrack, (void*))                                         \
     X(void, PyObject_GC_Del, (void*))                                             \
     X(int, PyCallable_Check, (PyObject*))                                         \
-    X(PyObject*, PyIter_Next, (PyObject*))                                        \
     X(int, PyNumber_Check, (PyObject*))                                           \
-    X(PyObject*, PyNumber_Float, (PyObject*))                                     \
-    X(int, PySequence_Check, (PyObject*))                                         \
-    X(int, PyMapping_Check, (PyObject*))                                          \
-    X(std::ptrdiff_t, PySequence_Size, (PyObject*))                               \
-    X(PyObject*, PySequence_GetItem, (PyObject*, std::ptrdiff_t))                 \
-    X(int, PySequence_SetItem, (PyObject*, std::ptrdiff_t, PyObject*))            \
-    X(PyObject*, PySequence_List, (PyObject*))                                    \
     X(PyObject*, PyFloat_FromDouble, (double))                                    \
     X(double, PyFloat_AsDouble, (PyObject*))                                      \
     X(PyObject*, PyLong_FromLongLong, (long long))                                \
-    X(PyObject*, PyLong_FromDouble, (double))                                     \
     X(long, PyLong_AsLong, (PyObject*))                                           \
     X(PyObject*, PyLong_FromVoidPtr, (void*))                                     \
     X(void*, PyLong_AsVoidPtr, (PyObject*))                                       \
-    X(PyObject*, PyUnicode_FromString, (const char*))                             \
     X(PyObject*, PyUnicode_InternFromString, (const char*))                       \
     X(PyObject*, PyUnicode_DecodeFSDefault, (const char*))                        \
     X(PyObject*, PyUnicode_DecodeLocale, (const char*, const char*))              \
-    X(PyObject*, PyUnicode_AsUTF8String, (PyObject*))                             \
-    X(PyObject*, PyUnicode_Join, (PyObject*, PyObject*))                          \
-    X(PyObject*, PyBytes_FromStringAndSize, (const char*, std::ptrdiff_t))        \
-    X(PyObject*, PyBytes_FromObject, (PyObject*))                                 \
     X(char*, PyBytes_AsString, (PyObject*))                                       \
-    X(int, PyBytes_AsStringAndSize, (PyObject*, char**, std::ptrdiff_t*))         \
-    X(PyObject*, PyByteArray_FromStringAndSize, (const char*, std::ptrdiff_t))    \
-    X(PyObject*, PyMemoryView_FromMemory, (char*, std::ptrdiff_t, int))           \
     X(int, PyArg_ParseTupleAndKeywords,                                           \
       (PyObject*, PyObject*, const char*, char**, ...))                           \
-    X(PyObject*, PyTuple_New, (std::ptrdiff_t))                                   \
     X(PyObject*, PyTuple_GetItem, (PyObject*, std::ptrdiff_t))                    \
-    X(int, PyTuple_SetItem, (PyObject*, std::ptrdiff_t, PyObject*))               \
     X(PyObject*, PyList_New, (std::ptrdiff_t))                                    \
-    X(std::ptrdiff_t, PyList_Size, (PyObject*))                                   \
     X(PyObject*, PyList_GetItem, (PyObject*, std::ptrdiff_t))                     \
     X(int, PyList_SetItem, (PyObject*, std::ptrdiff_t, PyObject*))                \
     X(int, PyList_Append, (PyObject*, PyObject*))                                 \
@@ -103,7 +72,6 @@ namespace neuron::python {
     X(PyObject*, PyDict_GetItem, (PyObject*, PyObject*))                          \
     X(PyObject*, PyDict_GetItemString, (PyObject*, const char*))                  \
     X(int, PyDict_SetItemString, (PyObject*, const char*, PyObject*))            \
-    X(int, PyDict_SetItem, (PyObject*, PyObject*, PyObject*))                     \
     X(PyObject*, PyObject_GenericGetAttr, (PyObject*, PyObject*))                 \
     X(int, PyObject_GenericSetAttr, (PyObject*, PyObject*, PyObject*))            \
     X(PyObject*, PyObject_CallMethodObjArgs, (PyObject*, PyObject*, ...))         \
@@ -118,11 +86,9 @@ namespace neuron::python {
 // Types and exceptions, data in the stable ABI. PyExc_* are pointers to the objects.
 #define NRNPY_TYPES(X)                                                            \
     X(_Py_NoneStruct) X(_Py_FalseStruct) X(_Py_TrueStruct) X(PyUnicode_Type)      \
-    X(PyBytes_Type) X(PyTuple_Type) X(PyList_Type) X(PyType_Type) X(PyFloat_Type)      \
-    X(PyLong_Type) X(PyDict_Type)
+    X(PyBytes_Type) X(PyTuple_Type) X(PyFloat_Type) X(PyLong_Type) X(PyDict_Type)
 #define NRNPY_EXCEPTIONS(X)                                                       \
-    X(PyExc_AttributeError) X(PyExc_Exception) X(PyExc_RuntimeError)              \
-    X(PyExc_SystemExit) X(PyExc_TypeError) X(PyExc_ValueError)
+    X(PyExc_AttributeError) X(PyExc_RuntimeError) X(PyExc_TypeError)
 // clang-format on
 
 struct Capi {
@@ -180,10 +146,8 @@ constexpr int meth_noargs = 0x0004;
 constexpr int t_object_ex = 16;  // Py_T_OBJECT_EX
 // Py_TPFLAGS_*
 constexpr unsigned long tpflags_disallow_instantiation = 1ul << 7,  // 3.10+
-    tpflags_basetype = 1ul << 10, tpflags_have_gc = 1ul << 14, tpflags_bytes_subclass = 1ul << 27,
-                        tpflags_unicode_subclass = 1ul << 28;
-constexpr int buf_write = 0x200;  // PyBUF_WRITE
-constexpr int file_input = 257;   // Py_file_input
+    tpflags_basetype = 1ul << 10, tpflags_have_gc = 1ul << 14;
+constexpr int file_input = 257;  // Py_file_input
 }  // namespace stable
 using stable::file_input;
 

@@ -72,10 +72,8 @@ static_assert(stable::tp_getattro == Py_tp_getattro && stable::tp_setattro == Py
 static_assert(stable::tpflags_disallow_instantiation == Py_TPFLAGS_DISALLOW_INSTANTIATION);
 static_assert(stable::t_object_ex == T_OBJECT_EX);
 static_assert(stable::tpflags_basetype == Py_TPFLAGS_BASETYPE &&
-              stable::tpflags_have_gc == Py_TPFLAGS_HAVE_GC &&
-              stable::tpflags_bytes_subclass == Py_TPFLAGS_BYTES_SUBCLASS &&
-              stable::tpflags_unicode_subclass == Py_TPFLAGS_UNICODE_SUBCLASS);
-static_assert(stable::buf_write == PyBUF_WRITE && stable::file_input == Py_file_input);
+              stable::tpflags_have_gc == Py_TPFLAGS_HAVE_GC);
+static_assert(stable::file_input == Py_file_input);
 
 #define SAME(ours, field, theirs, their_field)                              \
     static_assert(offsetof(ours, field) == offsetof(theirs, their_field) && \
