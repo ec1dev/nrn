@@ -35,82 +35,16 @@ extern const char* path_prefix_to_libnrniv();
 namespace neuron::python {
 namespace {
 
-// The part of the launcher that Python says better. It runs in its own namespace, where the C++
-// code has set executable, argv and neuron_parent.
+// The part of the launcher that Python says better is neuron/_launch.py. It runs in its own
+// namespace, where the C++ code has set executable, argv and neuron_parent; this finds it without
+// importing neuron.
 constexpr auto bootstrap = R"py(
-import importlib.machinery, os, sys
-
-sys.executable = executable
-sys.argv = argv
+import importlib.util, os, sys
 if neuron_parent and neuron_parent not in sys.path:
     sys.path.append(neuron_parent)
-basic_path = tuple(sys.path)
-
-
-def set_path(filename):
-    # As python: a script's directory, links resolved, or '' for anything else.
-    first = os.path.dirname(os.path.realpath(filename)) if filename else ""
-    sys.path[:] = (first, *basic_path)
-
-
-def compile_file(filename):
-    set_path(filename)
-    with open(filename, "rb") as file:
-        code = compile(file.read(), filename, "exec", dont_inherit=True)
-    sys.modules["__main__"].__file__ = filename
-    return code
-
-
-def flush():
-    # stdout is buffered when it is not a terminal; HOC's output comes next.
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.flush()
-        except Exception:
-            pass
-
-
-def import_readline():
-    # Imported later, it would replace NEURON's PyOS_ReadlineFunctionPointer.
-    try:
-        import readline
-    except ImportError:
-        pass
-
-
-def interact():
-    # The console is the standard library's: a code.py in the working directory must not replace
-    # it, also when PYTHONPATH names that directory (an empty entry, as in PYTHONPATH=:dir).
-    here = os.path.realpath(os.getcwd())
-    path = sys.path[:]
-    sys.path[:] = [p for p in basic_path if os.path.realpath(p or os.curdir) != here]
-    try:
-        import code
-    finally:
-        sys.path[:] = path
-    code.InteractiveConsole(vars(sys.modules["__main__"])).interact("", exitmsg="")
-
-
-class NeuronModules:
-    # hoc, nrn and _neuron_section, which the neuron package makes, before it is imported.
-    @staticmethod
-    def find_spec(name, path=None, target=None):
-        if name in ("hoc", "nrn", "_neuron_section") and "neuron" not in sys.modules:
-            import neuron
-
-            return importlib.machinery.ModuleSpec(name, NeuronModules)
-
-    @staticmethod
-    def create_module(spec):
-        return sys.modules[spec.name]
-
-    @staticmethod
-    def exec_module(module):
-        pass
-
-
-sys.meta_path.append(NeuronModules)
-set_path("")
+launch_file = os.path.join(os.path.dirname(importlib.util.find_spec("neuron").origin), "_launch.py")
+with open(launch_file, "rb") as f:
+    exec(compile(f.read(), launch_file, "exec", dont_inherit=True))
 )py";
 
 PyObject* launcher{};  // the namespace of the code above
