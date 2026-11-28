@@ -91,7 +91,8 @@ bool succeeded(Ref const& result) {
     return static_cast<bool>(result);
 }
 
-// PyConfig is not in the stable ABI. Py_Initialize reads these globals, if they are there.
+// PyConfig is not in the stable ABI. Py_Initialize reads these globals, if they are there
+// (docs/scripting.rst).
 bool set_flag(const char* name) {
     auto* const flag = static_cast<int*>(py.optional(name));
     if (flag) {
@@ -199,6 +200,9 @@ bool launch_python() {
     }
 }
 
+/// Python's allocator of the line a reader returns.
+void* (*raw_malloc)(std::size_t){};
+
 /// Read a line at a Python prompt with NEURON's reader, which runs its events while it waits.
 char* read_line(std::FILE*, std::FILE*, const char* prompt) {
     hoc_cbufstr->buf[0] = '\0';
@@ -211,10 +215,8 @@ char* read_line(std::FILE*, std::FILE*, const char* prompt) {
     if (r == 1) {
         hoc_ctp = hoc_cbufstr->buf + size - 1;
     }
-    // Python frees it.
-    auto* const raw_malloc = reinterpret_cast<void* (*) (std::size_t)>(
-        py.optional("PyMem_RawMalloc"));
-    auto* const line = static_cast<char*>(raw_malloc ? raw_malloc(size) : std::malloc(size));
+    // Python frees it, with PyMem_RawFree.
+    auto* const line = static_cast<char*>(raw_malloc(size));
     if (line) {
         std::memcpy(line, hoc_cbufstr->buf, size);
     }
@@ -293,8 +295,11 @@ int run_command_line() {
     }
     Gil const gil{};
     succeeded(launcher_function("import_readline"));
-    if (auto* const reader = static_cast<char* (**) (std::FILE*, std::FILE*, const char*)>(
-            py.optional("PyOS_ReadlineFunctionPointer"))) {
+    // Neither is in the stable ABI (docs/scripting.rst): without them Python's own reader stays.
+    auto* const reader = static_cast<char* (**) (std::FILE*, std::FILE*, const char*)>(
+        py.optional("PyOS_ReadlineFunctionPointer"));
+    raw_malloc = reinterpret_cast<void* (*) (std::size_t)>(py.optional("PyMem_RawMalloc"));
+    if (reader && raw_malloc) {
         *reader = read_line;
     }
     bool ok{true};

@@ -8,7 +8,7 @@ Working with Object and PyObject
 NEURON does not include :file:`Python.h`. The CPython functions it calls are looked up in the running
 interpreter; they are listed in :file:`src/nrniv/nrnpy_capi.h`, and all of them are in the stable ABI.
 The launcher (:file:`src/nrniv/nrnpy_launch.cpp`) also looks up a few interpreter globals outside it, each
-optional (see the comments there). Little C++ calls them: the base types of the interface's wrappers
+optional (:doc:`/scripting`, "Python's settings outside the stable ABI"). Little C++ calls them: the base types of the interface's wrappers
 (:file:`src/nrniv/nrnpy_types.cpp`), its fast path and the two callbacks that run per event and per
 element (:file:`src/nrniv/nrnpy_fast.cpp`), in ``namespace neuron::python``, with the GIL held (``Gil``)
 and each new reference in a ``Ref``.

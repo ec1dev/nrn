@@ -101,6 +101,22 @@ Multiple script files and commands:
     neuron`` would simply fail.
 
 
+Python's settings outside the stable ABI:
+    NEURON calls Python only through functions of the stable ABI, with which one NEURON
+    serves every CPython from 3.12 on. To start Python as ``python`` would, ``nrniv`` also
+    looks up three of the interpreter's own globals, which are not in it. Each is optional:
+    if a CPython no longer has it, ``nrniv`` runs without what it gives.
+
+    * ``Py_UTF8Mode`` (deprecated since 3.12): in the C or POSIX locale ``nrniv`` starts
+      Python in UTF-8 mode, as ``python`` does. Without it, Python uses the locale's
+      encoding there (ASCII).
+    * ``Py_NoSiteFlag`` (deprecated since 3.12): the ``-Py_NoSiteFlag`` option, as
+      ``python -S``. Without it the option prints a warning, and ``site`` is imported.
+    * ``PyOS_ReadlineFunctionPointer``, with ``PyMem_RawMalloc`` for the lines it returns:
+      at the ``>>>`` prompt and in ``input()``, NEURON reads the line and runs its events
+      (the GUI) while it waits. Without either, Python reads the line itself, and the GUI
+      does not respond while Python waits for input.
+
 ``-pyexe`` and ``NRN_PYTHONEXE``:
     The NEURON executables also accept a ``-pyexe`` argument, which governs
     which Python interpreter NEURON will try and launch.
