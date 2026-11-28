@@ -1,6 +1,7 @@
 #include <../../nrnconf.h>
 
 #include "nrnpy_capi.h"
+#include "nrnpy_hooks.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -111,6 +112,7 @@ void finalize() {
     if (std::this_thread::get_id() == host_thread) {
         py.PyGILState_Ensure();  // nothing is left to release it to
         py.PyErr_Clear();        // quit() in Python code that is handling an error
+        clear_hooks();           // their functions go with Python
         py.Py_FinalizeEx();
     }
 }

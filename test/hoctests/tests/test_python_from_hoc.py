@@ -156,20 +156,19 @@ except RuntimeError as e: print(repr(e.__cause__))""",
         "0.0\nhocobj_call error: hoc_execerror: PyObject method call failed: bad\nNone",
     ),
     "capi": (
-        """from neuron._interface import api
-hook, hoc, take = api.nrn_python_hook_set, api._nrn_hoc_call_nothrow, api._python_error_take
+        """from neuron._interface import _provider, api
+hoc, take = api._nrn_hoc_call_nothrow, _provider.take_exception
 def nested():
     print(hoc(b'p.bad()'), repr(take()))
     raise IndexError
 print(hoc(b'p.nested()'), repr(take()), take())
 sys.excepthook = lambda *args: print(args[0].__name__)
 print(hoc(b'p.missing'), hoc(b'{execute1("p.bad()", 0)}'), type(take()).__name__)
-epoch = [1]
-print(hook(b'nosuch', 1), hook(b'model_epoch', []), hook(b'model_epoch', epoch))
+epoch = api.EPOCH
 for change in b'p.types()', b'create s', b'access s', b's { delete_section() }':
     epoch[0] = 1
     print(hoc(change), epoch)""",
-        "1 None\n1 None None\nAttributeError\n1 0 NoneType\n1 2 0\n"
+        "1 None\n1 None None\nAttributeError\n1 0 NoneType\n"
         "0 [None]\n0 [None]\n0 [1]\n0 [None]",
     ),
     "garbage": (

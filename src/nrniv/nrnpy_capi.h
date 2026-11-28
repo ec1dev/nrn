@@ -262,10 +262,9 @@ Ref call(PyObject* f, Args const&... args) {
 
 /// vars(__main__), borrowed. Null with an error set on failure.
 PyObject* main_namespace();
-/// Run statements in __main__, as nrnpython() does. Null with an error set on failure.
+/// Run statements in __main__, as python -c does. Null with an error set on failure.
 Ref run(const char* statements);
-/// The Python error is set: make it a HOC error. If HOC was not called from Python the error is
-/// printed, and SystemExit ends the process; otherwise the Python caller gets the exception.
+/// The Python error is set: print it, and make the message a HOC error.
 [[noreturn]] void hoc_error_from_python(const std::string& message);
 
 }  // namespace neuron::python

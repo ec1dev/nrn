@@ -7,14 +7,12 @@
 #include <array>
 #include <cstdio>
 #include <string>
-#include <unordered_map>
 #include <utility>
 
 #include "neuronapi.h"
 #include "nrn_ansi.h"
 #include "ocjump.h"
 #include "nrnpy_capi.h"
-#include "nrnpy_object.h"
 #include "nrnpy_types.h"
 #include "ocfunc.h"
 #include "section.h"
@@ -266,21 +264,10 @@ PyObject* make_type(const char* name,
     return py.PyType_FromSpec(&spec);
 }
 
-template <int N>
-Ref make(PyObject* type, std::array<PyObject*, N> const& values) {
-    Ref instance{py.PyType_GenericAlloc(type, 0)};
-    for (int i = 0; instance && i < N; ++i) {
-        auto* const value = values[i] ? values[i] : py._Py_NoneStruct;
-        reinterpret_cast<Instance<N>*>(instance.get())->slots[i] = Ref::borrow(value).release();
-    }
-    return instance;
+/// Python's sections are owned by their objects, and HOC asks those for a section's name and cell.
+void own_sections() {
+    nrn_section_owner_hooks_set(section_name, section_cell_object, section_cell_equals, nullptr, 0);
 }
-
-struct Class {
-    std::string name;
-    PyObject *type{}, *name_object{};
-};
-std::unordered_map<cTemplate*, Class> classes;
 
 }  // namespace
 
@@ -310,6 +297,7 @@ bool make_types() {
     if (!types.object || !types.section || !types.segment) {
         return false;
     }
+    own_sections();
     if (!fast) {  // the interface's classes are then as without the fast path
         return true;
     }
@@ -335,74 +323,20 @@ Section* section(PyObject* wrapper) {
     return address ? static_cast<Section*>(py.PyLong_AsVoidPtr(address)) : nullptr;
 }
 
-void own_sections() {
-    nrn_section_owner_hooks_set(section_name, section_cell_object, section_cell_equals, nullptr, 0);
-}
-
-void forget_classes() {
-    for (auto const& [_, known]: std::exchange(classes, {})) {
-        Ref const type{known.type}, name{known.name_object};
-    }
-}
-
-Ref wrap(Object* o) {
-    auto const* known = &classes[o->ctemplate];
-    // KSChan renames its class.
-    if (auto const* const name = o->ctemplate->sym->name; !known->type || known->name != name) {
-        Ref class_name{py.PyUnicode_FromString(name)};
-        Ref type = call(need(Hook::object_class).get(), class_name);
-        if (!type) {
-            return {};
-        }
-        if (!is_instance(type.get(), py.PyType_Type) ||
-            !py.PyType_IsSubtype(type.get(), types.object)) {
-            py.PyErr_SetString(py.PyExc_TypeError, "object_class returned no class of objects");
-            return {};
-        }
-        // Not through known: importing neuron, or the hook, can register an object_class.
-        known = &(classes[o->ctemplate] = {name, type.release(), class_name.release()});
-    }
-    Ref const address{py.PyLong_FromVoidPtr(o)};
-    Ref wrapper = make<ObjectSlot::count>(known->type, {address.get(), known->name_object});
-    if (wrapper) {
-        hoc_obj_ref(o);
-    }
-    return wrapper;
-}
-
 Ref segment(PyObject* section, double x) {
-    Ref const position{py.PyFloat_FromDouble(x)};
-    return position ? make<SegmentSlot::count>(need(Hook::segment_class).get(),
-                                               {section, position.get()})
-                    : Ref{};
-}
-
-Ref python_section(Section* sec) {
-    auto* const object = owner(sec);
-    return object ? Ref::borrow(object) : Ref{};
-}
-
-Ref wrap(Section* sec) {
-    if (Ref object = python_section(sec)) {
-        return object;
-    }
-    Ref const address{py.PyLong_FromVoidPtr(sec)};
-    Ref wrapper = make<SectionSlot::count>(need(Hook::section_class).get(),
-                                           {address.get(), py._Py_FalseStruct});
-    if (wrapper) {
-        section_ref(sec);
-    }
-    return wrapper;
-}
-
-Ref wrap(Section* sec, double x) {
-    Ref const section = wrap(sec);
-    if (!section) {
+    auto* const segment_class = fast::segment_class();
+    if (!segment_class) {
         return {};
     }
     Ref const position{py.PyFloat_FromDouble(x)};
-    return make<SegmentSlot::count>(need(Hook::segment_class).get(),
-                                    {section.get(), position.get()});
+    Ref instance{position ? py.PyType_GenericAlloc(segment_class, 0) : nullptr};
+    if (instance) {
+        auto* const slots = reinterpret_cast<Instance<SegmentSlot::count>*>(instance.get())->slots;
+        slots[SegmentSlot::sec] = Ref::borrow(section).release();
+        slots[SegmentSlot::x] = Ref::borrow(position.get()).release();
+        slots[SegmentSlot::mech_cache] = Ref::borrow(py._Py_NoneStruct).release();
+    }
+    return instance;
 }
 
 }  // namespace neuron::python

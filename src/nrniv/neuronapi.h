@@ -222,10 +222,14 @@ NRN_DLLSYM double nrn_distance(Section* sec0, double x0, Section* sec1, double x
 /****************************************
  * Python (builds with NRN_ENABLE_PYTHON)
  ****************************************/
-NRN_DLLSYM int nrn_python_hook_set(const char* name, PyObject* object);
+typedef struct nrn_bytes nrn_bytes;
+NRN_DLLSYM int nrn_python_hook_set(const char* name,
+                                   void (*hook)(void),
+                                   char* error_msg,
+                                   size_t error_msg_size);
+NRN_DLLSYM void nrn_bytes_set(nrn_bytes* out, const char* data, size_t size);
 NRN_DLLSYM Object* nrn_python_object_new(PyObject* value);
 NRN_DLLSYM PyObject* nrn_python_object_get(Object* obj);
-NRN_DLLSYM PyObject* nrn_python_error_take(void);
 NRN_DLLSYM PyObject* nrn_python_type(const char* name);
 
 /****************************************
@@ -242,6 +246,7 @@ NRN_DLLSYM float nrn_get_plotshape_high(ShapePlotInterface* spi);
  ****************************************/
 NRN_DLLSYM int nrn_hoc_call(char const* command);
 NRN_DLLSYM int nrn_hoc_call_nothrow(char const* command);
+NRN_DLLSYM int nrn_hoc_error_is_returned(void);
 NRN_DLLSYM void nrn_str_assign(char** target, const char* value);
 NRN_DLLSYM int nrn_structure_change_count(void);
 NRN_DLLSYM int nrn_mechanism_type_count(void);

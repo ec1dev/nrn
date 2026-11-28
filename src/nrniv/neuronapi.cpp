@@ -1113,14 +1113,11 @@ int nrn_object_new_nothrow(Symbol* sym,
     // caller (ctypes, MATLAB, ...) does not have a C++ exception propagate
     // across the FFI boundary. On success returns 0 with *result set; on error
     // returns nonzero with *result NULL and error_msg populated.
-    neuron::python::ErrorScope scope{true};
+    neuron::python::ErrorScope const scope{true};
     Object* object{};
     bool const ok = nrn_nothrow([&] { object = OcJump::newobj_throw_on_exception(sym, narg); },
                                 error_msg,
                                 error_msg_size);
-    if (!ok) {
-        scope.caught();
-    }
     if (result) {
         *result = object;
     }
@@ -1147,7 +1144,7 @@ static bool call_method(Object* obj,
                         char* error_msg,
                         size_t error_msg_size,
                         HocReturnType& type) {
-    neuron::python::ErrorScope scope{true};
+    neuron::python::ErrorScope const scope{true};
     // obj may not outlive the call.
     bool const builtin = obj->ctemplate->id <= hoc_max_builtin_class_id;
     auto const outer = std::exchange(hoc_return_type_code, HocReturnType::floating);
@@ -1157,9 +1154,6 @@ static bool call_method(Object* obj,
     // After a method in HOC it is of what that called.
     type = builtin ? hoc_return_type_code : HocReturnType::floating;
     hoc_return_type_code = outer;
-    if (!ok) {
-        scope.caught();
-    }
     // Release the temporary object HOC kept alive during the call (hoc_pop_defer),
     // as the Python binding does after each call; the result has its own reference.
     hoc_unref_defer();
@@ -1206,13 +1200,10 @@ int nrn_method_call_number(Object* obj,
 }
 
 int nrn_function_call_nothrow(Symbol* sym, int narg, char* error_msg, size_t error_msg_size) {
-    neuron::python::ErrorScope scope{true};
+    neuron::python::ErrorScope const scope{true};
     bool const ok = nrn_nothrow([&] { OcJump::execute_throw_on_exception(sym, narg); },
                                 error_msg,
                                 error_msg_size);
-    if (!ok) {
-        scope.caught();
-    }
     // Release the temporary object HOC kept alive during the call (hoc_pop_defer),
     // as the Python binding does after each call; the result has its own reference.
     hoc_unref_defer();
@@ -1297,8 +1288,13 @@ int nrn_hoc_call(char const* const command) {
     return hoc_oc(command);
 }
 
+int nrn_hoc_error_is_returned(void) {
+    auto const* const scope = neuron::python::ErrorScope::innermost();
+    return scope && scope->can_be_taken;
+}
+
 int nrn_hoc_call_nothrow(char const* command) {
-    neuron::python::ErrorScope scope{true};
+    neuron::python::ErrorScope const scope{true};
     auto line = std::string{command} + '\n';
     bool const ok = nrn_nothrow([&] {
         OcJump::fpycall(
@@ -1309,9 +1305,6 @@ int nrn_hoc_call_nothrow(char const* command) {
             line.data(),
             nullptr);
     });
-    if (!ok) {
-        scope.caught();
-    }
     return !ok;
 }
 

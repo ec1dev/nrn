@@ -9,7 +9,7 @@
 #include "nonvintblock.h"
 #include "nrnmpi.h"
 #include "nrnpy_launch.h"
-#include "nrnpy_object.h"
+#include "nrnpy_hooks.h"
 
 #include <algorithm>
 #include <cctype>

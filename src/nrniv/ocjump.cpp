@@ -109,6 +109,23 @@ struct saved_state {
 };
 }  // namespace
 
+namespace neuron::python {
+namespace {
+thread_local ErrorScope* innermost_scope{};
+}
+ErrorScope::ErrorScope(bool can_be_taken)
+    : outer_{std::exchange(innermost_scope, this)}
+    , can_be_taken{can_be_taken} {}
+
+ErrorScope::~ErrorScope() {
+    innermost_scope = outer_;
+}
+
+ErrorScope* ErrorScope::innermost() {
+    return innermost_scope;
+}
+}  // namespace neuron::python
+
 bool OcJump::execute(Inst* p) {
     saved_state before{};
     try_catch_depth_increment tell_children_we_will_catch{};

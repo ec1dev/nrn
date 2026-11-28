@@ -389,6 +389,19 @@ void finalize_interpreter() {
 }
 }  // namespace
 
+/// vars(__main__), borrowed. Null with an error set on failure.
+PyObject* main_namespace() {
+    auto* const main = py.PyImport_AddModule("__main__");
+    return main ? py.PyModule_GetDict(main) : nullptr;
+}
+
+/// Run statements in __main__, as python -c does. Null with an error set on failure.
+Ref run(const char* statements) {
+    Ref const code{py.Py_CompileString(statements, "<string>", file_input)};
+    auto* const vars = code ? main_namespace() : nullptr;
+    return Ref{vars ? py.PyEval_EvalCode(code.get(), vars, vars) : nullptr};
+}
+
 void register_launcher() {
     launch = launch_python;
     methods.interpreter_finalize = finalize_interpreter;

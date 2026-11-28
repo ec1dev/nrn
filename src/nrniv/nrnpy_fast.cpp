@@ -1,4 +1,5 @@
-// The fast path of the interface's hot attribute and item accesses (prototype).
+// The fast path of the interface's hot attribute and item accesses (prototype), and the two
+// callbacks that run per event and per Vector element (hoccommand_exec, Vector.apply).
 //
 // Only the common case is decided here: a scalar range variable of a segment or of a density
 // mechanism at an interior x, a Vector element at an int index, the segments of a section. The
@@ -23,7 +24,11 @@
 #include "hocdec.h"
 #include "neuronapi.h"
 #include "nrnpy_capi.h"
-#include "nrnpy_object.h"
+#include "ivocvect.h"
+#include "nrn_ansi.h"
+#include "nrnpy.h"
+#include "nrnpy_hooks.h"
+#include "oc_ansi.h"
 #include "nrnpy_types.h"
 
 extern std::size_t nrn_kschan_symbols_changed;
@@ -409,6 +414,59 @@ PyObject* table(const char* name) {
     return dict.release();
 }
 
+// ---- the callbacks that run per event and per element. A failure is the interface's to report.
+
+/// Call a callable, or the first element of a tuple with the second, or its elements, as arguments.
+Ref call_command(PyObject* command) {
+    if (!is_instance(command, py.PyTuple_Type)) {
+        return Ref{py.PyObject_CallObject(command, nullptr)};
+    }
+    auto* const callable = py.PyTuple_GetItem(command, 0);
+    auto* const args = callable ? py.PyTuple_GetItem(command, 1) : nullptr;
+    if (!args) {
+        return {};
+    }
+    if (is_instance(args, py.PyTuple_Type)) {
+        return Ref{py.PyObject_CallObject(callable, args)};
+    }
+    return call(callable, Ref::borrow(args));
+}
+
+int hoccommand_exec(Object* o) {
+    require_python_object(o, "not a Python callback");
+    Top const top{};
+    Ref const held = Ref::borrow(payload(o));
+    if (call_command(held.get())) {
+        return 1;
+    }
+    callback_failed(0);
+    return 0;
+}
+
+void vec_apply(IvocVect* vec, Object* o, int start, int end) {
+    require_python_object(o, "apply: first argument must be a HOC string or a Python callable");
+    Top const top{};
+    Ref const f = Ref::borrow(payload(o));
+    if (!py.PyCallable_Check(f.get())) {
+        hoc_execerror("Object is not callable", nullptr);
+    }
+    for (int i = start; i <= end; ++i) {
+        Ref const arg{py.PyFloat_FromDouble(vec->elem(i))};
+        Ref const result = call(f.get(), arg);
+        if (!result) {
+            callback_failed(1);
+        }
+        if (!py.PyNumber_Check(result.get())) {
+            hoc_execerror("Expected a numeric result from Python function", nullptr);
+        }
+        double const value = py.PyFloat_AsDouble(result.get());
+        if (value == -1. && py.PyErr_Occurred()) {
+            callback_failed(2);
+        }
+        vec->elem(i) = value;
+    }
+}
+
 }  // namespace
 
 stable::Method section_methods[]{
@@ -429,6 +487,27 @@ PyObject* mechanism_getattro(PyObject* self, PyObject* name) {
 
 int mechanism_setattro(PyObject* self, PyObject* name, PyObject* value) {
     return setattro<mechanism_symbol, mechanism_location, false>(self, name, value);
+}
+
+PyObject* segment_class() {
+    return shared(t.segment_class, "_fast_segment_class");
+}
+
+void forget_classes() {
+    // Not released: this may run without the GIL. Only an interface imported again sets them anew.
+    t.epoch = t.nseg_generation = t.segment_class = t.mechanism_class = t.vector_class = nullptr;
+}
+
+void register_callbacks() {
+    methods.hoccommand_exec = hoccommand_exec;
+    nrnpy_hoccommand_exec = hoccommand_exec;
+    nrnpy_vec_apply_p_ = vec_apply;
+    nrnpy_tree_changed_p_ = [] {
+        if (started()) {
+            Gil const gil{};
+            model_changed();
+        }
+    };
 }
 
 bool enabled() {
@@ -476,3 +555,16 @@ bool make_types() {
 }
 
 }  // namespace neuron::python::fast
+
+namespace neuron::python {
+void model_changed() {
+    // The interface keeps the epoch in a list. None stands for one that nobody has asked for yet.
+    if (!types.segment) {
+        return;
+    }
+    if (auto* const list = fast::shared(fast::t.epoch, "_fast_epoch");
+        list && py.PyList_GetItem(list, 0) != py._Py_NoneStruct) {
+        py.PyList_SetItem(list, 0, Ref::borrow(py._Py_NoneStruct).release());
+    }
+}
+}  // namespace neuron::python

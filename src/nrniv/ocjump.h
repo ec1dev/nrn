@@ -10,7 +10,6 @@ union Inst;
 struct Object;
 union Objectdata;
 struct Symlist;
-struct _object;
 
 /** @brief How many NEURON try { ... } catch(...) { ... } blocks are in the call
  * stack.
@@ -35,13 +34,10 @@ struct try_catch_depth_increment {
 };
 
 namespace neuron::python {
-/// A place where HOC errors are caught. A Python exception that becomes a HOC error is kept for the
-/// innermost one if Python code can get it there (nrn_python_error_take); otherwise it is printed
-/// where it happens, as HOC's message is.
+/// A place where HOC errors are caught: whether its caller gets the error as a status and message
+/// (a _nothrow function of the C API) or HOC itself goes on (nrn_hoc_error_is_returned).
 class ErrorScope {
-#if USE_PYTHON
     ErrorScope* const outer_;
-    _object* exception_{};
 
   public:
     bool const can_be_taken;
@@ -50,15 +46,6 @@ class ErrorScope {
     ErrorScope(const ErrorScope&) = delete;
     ErrorScope& operator=(const ErrorScope&) = delete;
     static ErrorScope* innermost();
-    /// Takes over a reference.
-    void keep(_object* exception);
-    /// The error arrived: its exception can be taken now.
-    void caught();
-#else
-  public:
-    explicit ErrorScope(bool) {}
-    void caught() {}
-#endif
 };
 }  // namespace neuron::python
 

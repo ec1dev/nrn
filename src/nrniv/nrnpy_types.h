@@ -50,17 +50,6 @@ PyObject* slot(PyObject* instance, int i);
 /// What a wrapper stands for. Null for one whose construction failed.
 Object* hoc_object(PyObject* wrapper);
 Section* section(PyObject* wrapper);
-/// Python's sections are owned by their objects, and HOC asks those for a section's name and cell.
-void own_sections();
-/// object_class gives other classes now.
-void forget_classes();
-/// The object of a section that Python made; null for one that HOC made.
-Ref python_section(Section* sec);
-/// A new wrapper, or for a section that Python made its object. Null with an error set on failure;
-/// a HOC error if there is no interface.
-Ref wrap(Object* o);
-Ref wrap(Section* sec);
-Ref wrap(Section* sec, double x);
 /// A new Segment of the interface's class at x of that Section wrapper. Null with an error set.
 Ref segment(PyObject* section, double x);
 
@@ -76,6 +65,12 @@ extern stable::Method section_methods[];
 bool enabled();
 /// The Vector base type and the tables the interface fills; after make_types' own.
 bool make_types();
+/// The interface's classes and epoch, which the interface sets as attributes of the Segment base
+/// type, borrowed; read once. forget_classes(): read them again, for an interface imported again.
+PyObject* segment_class();
+void forget_classes();
+/// Install the callbacks that run per event and per element, and the end of the model epoch.
+void register_callbacks();
 }  // namespace fast
 
 }  // namespace neuron::python
