@@ -2,6 +2,8 @@
 
 #include "../../nrnconf.h"
 #include "hocdec.h"
+#include "hocstr.h"
+#include "nrnfilewrap.h"
 #include "membfunc.h"
 #include "oc_ansi.h"
 #include "cabcode.h"
@@ -12,7 +14,6 @@
 #include "ocfunc.h"
 #include "ocjump.h"
 #include "nrnpy.h"
-#include "nrnpy_capi.h"
 #include "parse.hpp"
 #include "nrn_ansi.h"
 #include "section.h"
@@ -24,6 +25,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 /// A public face of hoc_Item
@@ -153,8 +155,17 @@ static nrn_section_owner_name_func capi_owner_name;
 static nrn_section_owner_cell_func capi_owner_cell;
 static nrn_section_owner_cell_equals_func capi_owner_cell_equals;
 
+// The name of each owned section, which its hook gives once, when the section is made: the owner
+// may be on its way out when NEURON next needs it (nrn_section_owned_release).
+static std::unordered_map<Section*, std::string> owned_names;
+
+static char* owned_name(Section* sec) {
+    auto const known = owned_names.find(sec);
+    return known != owned_names.end() ? known->second.data() : capi_owner_name(sec);
+}
+
 static bool capi_owner_hooks_installed() {
-    return capi_owner_name && nrnpy_pysec_name_p_ == capi_owner_name &&
+    return capi_owner_name && nrnpy_pysec_name_p_ == owned_name &&
            nrnpy_pysec_cell_p_ == capi_owner_cell &&
            nrnpy_pysec_cell_equals_p_ == capi_owner_cell_equals;
 }
@@ -191,14 +202,15 @@ bool nrn_section_owner_hooks_set(nrn_section_owner_name_func name,
     }
     // The hooks are global. Refuse to replace another provider's (NEURON's own
     // Python module installs them), whose sections would then be misread.
-    if ((nrnpy_pysec_name_p_ && nrnpy_pysec_name_p_ != name) ||
+    if ((nrnpy_pysec_name_p_ && (nrnpy_pysec_name_p_ != owned_name || capi_owner_name != name)) ||
         (nrnpy_pysec_cell_p_ && nrnpy_pysec_cell_p_ != cell) ||
         (nrnpy_pysec_cell_equals_p_ && nrnpy_pysec_cell_equals_p_ != cell_equals)) {
         return owner_hooks_fail(error_msg,
                                 error_msg_size,
                                 "section owner hooks are already installed by another provider");
     }
-    nrnpy_pysec_name_p_ = capi_owner_name = name;
+    capi_owner_name = name;
+    nrnpy_pysec_name_p_ = owned_name;
     nrnpy_pysec_cell_p_ = capi_owner_cell = cell;
     nrnpy_pysec_cell_equals_p_ = capi_owner_cell_equals = cell_equals;
     return true;
@@ -226,8 +238,23 @@ Section* nrn_section_new_owned(void* owner) {
         return nullptr;
     }
     Section* sec = section_new_owned(owner);
+    owned_names[sec] = capi_owner_name(sec);
     nrnpy_pysecname2sec_add(sec);
     return sec;
+}
+
+int nrn_section_new_owned_nothrow(void* owner,
+                                  Section** result,
+                                  char* error_msg,
+                                  size_t error_msg_size) {
+    *result = nullptr;
+    if (!nrn_nothrow([&] { *result = nrn_section_new_owned(owner); }, error_msg, error_msg_size)) {
+        return 1;
+    }
+    return *result ? 0
+                   : !owner_hooks_fail(error_msg,
+                                       error_msg_size,
+                                       "no owner, or the section owner hooks are not installed");
 }
 
 void* nrn_section_owner_get(Section* sec) {
@@ -247,8 +274,10 @@ void nrn_section_owned_release(Section* sec) {
     if (sec->prop && sec->prop->dparam[PROP_PY_INDEX].get<void*>()) {
         nrnpy_pysecname2sec_remove(sec);
         sec->prop->dparam[PROP_PY_INDEX] = nullptr;
+        owned_names.erase(sec);
         sec_free(sec->prop->dparam[8].get<hoc_Item*>());
     } else if (!sec->prop) {
+        owned_names.erase(sec);
         section_unref(sec);
     }
 }
@@ -1311,6 +1340,23 @@ int nrn_hoc_call(char const* const command) {
 int nrn_hoc_error_is_returned(void) {
     auto const* const scope = neuron::python::ErrorScope::innermost();
     return scope && scope->can_be_taken;
+}
+
+const char* nrn_hoc_readline(const char* prompt) {
+    hoc_cbufstr->buf[0] = '\0';
+    hoc_promptstr = prompt;
+    auto* const input = hoc_fin;
+    hoc_fin = input ? input : nrn_fw_set_stdin();  // an embedding program's HOC has none
+    int r{};
+    bool const read = nrn_nothrow([&] { r = hoc_get_line(); });
+    hoc_fin = input;
+    if (!read || (r != 1 && r != EOF)) {
+        return nullptr;
+    }
+    if (r == 1) {
+        hoc_ctp = hoc_cbufstr->buf + std::strlen(hoc_cbufstr->buf);
+    }
+    return hoc_cbufstr->buf;
 }
 
 int nrn_hoc_call_nothrow(char const* command) {

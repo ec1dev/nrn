@@ -1,16 +1,16 @@
-// PythonObject, and the functions with which HOC and the simulator call Python: callbacks,
-// locations given as Python objects, Vector.from_python, SectionList of Python sections, pickled
-// jobs, the GUI in Python.
+// PythonObject, and the functions with which HOC and the simulator call Python:
+// callbacks, locations given as Python objects, Vector.from_python, SectionList of Python sections,
+// pickled jobs, the GUI in Python, the names and cells of Python's sections.
 //
 // What each of them does is the interface's (Python) job: it registers one C function per hook with
 // nrn_python_hook_set (docs/capi.rst). This file adapts the core's calls to them: it keeps the
 // PythonObject and HOC's context for the call, and raises the HOC error of a hook that failed,
-// after the hook has returned, so nothing is thrown through a Python frame.
+// after the hook has returned, so nothing is thrown through a Python frame. It does not call
+// CPython: a Python object is a void* here, which only the interface reads.
 #include <../../nrnconf.h>
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -23,9 +23,8 @@
 #include "ivocvect.h"
 #include "neuronapi.h"
 #include "nrnoc2iv.h"
-#include "nrnpy_capi.h"
+#include "nrnpy.h"
 #include "nrnpy_hooks.h"
-#include "nrnpy_types.h"
 #include "oc_ansi.h"
 #include "ocjump.h"
 #include "ocpointer.h"
@@ -40,22 +39,27 @@ struct nrn_bytes {
 };
 
 extern Object** hoc_temp_objptr(Object*);
-extern "C" NRN_EXPORT int nrnpy_set_gui_callback(PyObject*);
+extern "C" NRN_EXPORT int nrnpy_set_gui_callback(void*);
 extern void oc_restore_hoc_oop(Object**, Objectdata**, int*, Symlist**);
 extern void oc_save_hoc_oop(Object**, Objectdata**, int*, Symlist**);
+extern NRN_DLLSYM void (*nrnpy_tree_changed_p_)();
 
 namespace neuron::python {
+
+bool (*import_interface)();
+
 namespace {
 
 // clang-format off
 #define NRNPY_HOOKS(X)                                                                        \
-    X(component) X(component_assign) X(to_python) X(to_number) X(operator_) X(statement)      \
-    X(callback_failed) X(call_string) X(call_number) X(praxis) X(bind_arguments)              \
+    X(component) X(component_assign) X(to_number) X(operator_) X(statement) X(release)        \
+    X(hold) X(command) X(apply) X(call_string) X(call_number) X(praxis) X(bind_arguments)      \
     X(call_with_section) X(command_tool) X(variable_get) X(variable_set) X(variable_string)   \
     X(gui_call) X(location) X(is_segment) X(segment_new) X(sections) X(numbers)               \
     X(vector_to_python) X(vector_as_numpy) X(pickle) X(unpickle) X(call_pickled)              \
     X(savestate_store) X(savestate_restore) X(coreneuron_option) X(coreneuron_arg)            \
-    X(rvp_callable) X(wait_begin) X(wait_end) X(collective)
+    X(rvp_callable) X(wait) X(collective) X(section_name) X(section_cell)   \
+    X(section_cell_equals) X(launcher)
 // clang-format on
 enum class Hook {
 #define X(name) name,
@@ -79,29 +83,31 @@ std::string hook_name(Hook hook) {
 
 using Function = void (*)();
 Function hooks[static_cast<int>(Hook::count)];
-bool hooks_registered{};
 
 constexpr std::size_t error_size = 1024;
 using Err = char*;
 
 // The C signatures (docs/capi.rst). A hook returns 1 when it is done, 0 with a message when it
-// failed; 2 and 3 say more where noted.
+// failed; 2 and 3 say more where noted. A void* is a Python object: what a PythonObject holds,
+// borrowed, or null for HOC's `new PythonObject()`, which stands for __main__.
 using Component = int (*)(Object*, void*, const char*, int, int, Err, std::size_t);
 using ComponentAssign = int (*)(Object*, void*, Err, std::size_t);
-using ToPython = int (*)(Object*, PyObject**, Err, std::size_t);
-using ToNumber = int (*)(PyObject*, double*);
-using Operator = int (*)(PyObject*, const char*, Object*, int, double, Err, std::size_t);
+using ToNumber = int (*)(Object*, double*);
+using Operator = int (*)(void*, const char*, Object*, int, double, Err, std::size_t);
 using Statement = int (*)(const char*, int*, Err, std::size_t);
-using CallbackFailed = int (*)(int, PyObject*, Err, std::size_t);
-using CallString = int (*)(PyObject*, nrn_bytes*, Err, std::size_t);
-using CallNumber = int (*)(PyObject*, int, int, double*, Err, std::size_t);
-using Praxis = int (*)(PyObject*, Object*, double*, Err, std::size_t);
-using BindArguments = int (*)(PyObject*, int, Object**, Err, std::size_t);
-using CallWithSection = int (*)(PyObject*, Section*, Err, std::size_t);
-using CommandTool = int (*)(PyObject*, int, double, double, int, Err, std::size_t);
-using VariableGet = int (*)(PyObject*, double*, Err, std::size_t);
-using VariableSet = int (*)(PyObject*, double, Err, std::size_t);
-using VariableString = int (*)(PyObject*, nrn_bytes*, Err, std::size_t);
+using Release = void (*)(void*);
+using Hold = int (*)(void*, void**);
+using Command = int (*)(void*, Err, std::size_t);
+using Apply = int (*)(void*, Object*, int, int, Err, std::size_t);
+using CallString = int (*)(void*, nrn_bytes*, Err, std::size_t);
+using CallNumber = int (*)(void*, int, int, double*, Err, std::size_t);
+using Praxis = int (*)(void*, Object*, double*, Err, std::size_t);
+using BindArguments = int (*)(void*, int, Object**, Err, std::size_t);
+using CallWithSection = int (*)(void*, Section*, Err, std::size_t);
+using CommandTool = int (*)(void*, int, double, double, int, Err, std::size_t);
+using VariableGet = int (*)(void*, double*, Err, std::size_t);
+using VariableSet = int (*)(void*, double, Err, std::size_t);
+using VariableString = int (*)(void*, nrn_bytes*, Err, std::size_t);
 using GuiCall = int (*)(const char*,
                         Object*,
                         Object*,
@@ -113,48 +119,60 @@ using GuiCall = int (*)(const char*,
                         nrn_bytes*,
                         Err,
                         std::size_t);
-using Location = int (*)(PyObject*, int, Section**, double*, Err, std::size_t);
-using IsSegment = int (*)(PyObject*);
+using Location = int (*)(void*, int, Section**, double*, Err, std::size_t);
+using IsSegment = int (*)(void*);
 using SegmentNew = int (*)(Section*, double, Object**, Err, std::size_t);
-using Sections = int (*)(PyObject*, nrn_bytes*, Err, std::size_t);
-using Numbers = int (*)(const char*, PyObject*, nrn_bytes*, Err, std::size_t);
+using Sections = int (*)(void*, nrn_bytes*, Err, std::size_t);
+using Numbers = int (*)(const char*, void*, nrn_bytes*, Err, std::size_t);
 using VectorToPython =
-    int (*)(double*, std::size_t, const char*, PyObject*, Object**, Err, std::size_t);
+    int (*)(double*, std::size_t, const char*, void*, Object**, Err, std::size_t);
 using VectorAsNumpy = int (*)(double*, std::size_t, Object**, Err, std::size_t);
-using Pickle = int (*)(PyObject*, nrn_bytes*, Err, std::size_t);
+using Pickle = int (*)(void*, nrn_bytes*, Err, std::size_t);
 using Unpickle = int (*)(const char*, std::size_t, Object**, Err, std::size_t);
 using CallPickled = int (*)(const char*, std::size_t, int, nrn_bytes*, Err, std::size_t);
 using SavestateStore = int (*)(nrn_bytes*, Err, std::size_t);
 using SavestateRestore = int (*)(const char*, std::size_t, Err, std::size_t);
 using CoreneuronOption = int (*)(int, int*);
 using CoreneuronArg = int (*)(double, nrn_bytes*);
-using RvpCallable = int (*)(PyObject*, Object**, Err, std::size_t);
-using Wait = void (*)();
+using RvpCallable = int (*)(void*, Object**, Err, std::size_t);
+using Wait = void (*)(void (*)(void*), void*);
 using Collective = int (*)(int, int, int, Object**, Err, std::size_t);
+using SectionName = int (*)(void*, nrn_bytes*);
+using SectionCell = int (*)(void*, Object**);
+using SectionCellEquals = int (*)(void*, Object*);
+using Launcher = int (*)(const char*, const char*);
 
 /// Is the hook registered? Does not start Python.
 bool has(Hook hook) {
     return hooks[static_cast<int>(hook)];
 }
 
-/// Importing neuron registers the hooks; once. The GIL is held.
+template <typename F>
+F get(Hook hook) {
+    return reinterpret_cast<F>(hooks[static_cast<int>(hook)]);
+}
+
+/// Start Python if need be, and import neuron, which registers the hooks; once.
 void import_neuron() {
+    if (!start()) {
+        hoc_execerror("Python not available", nullptr);
+    }
     static bool tried{};
-    if (std::exchange(tried, true) || hooks_registered) {
+    if (!import_interface || std::exchange(tried, true)) {
         return;
     }
     // Importing it reads HOC files, and HOC is in a line.
     std::string const line{hoc_cbufstr->buf};
     auto const position = hoc_ctp - hoc_cbufstr->buf;
-    Ref const neuron{py.PyImport_ImportModule("neuron")};
+    bool const imported = import_interface();
     std::strcpy(hoc_cbufstr->buf, line.c_str());
     hoc_ctp = hoc_cbufstr->buf + position;
-    if (!neuron) {
-        hoc_error_from_python("could not import neuron");
+    if (!imported) {
+        hoc_execerror("could not import neuron", nullptr);
     }
 }
 
-/// The hook, which importing neuron registers; a HOC error if there is none. The GIL is held.
+/// The hook, which importing neuron registers; a HOC error if there is none.
 template <typename F>
 F need(Hook hook) {
     if (!has(hook)) {
@@ -163,45 +181,45 @@ F need(Hook hook) {
     if (!has(hook)) {
         hoc_execerror("The neuron package did not register its Python hooks", nullptr);
     }
-    return reinterpret_cast<F>(hooks[static_cast<int>(hook)]);
+    return get<F>(hook);
 }
 
 /// Python code can drop the last other reference to an object.
-class Hold {
+class Held {
     Object* o_;
 
   public:
-    explicit Hold(Object* o)
+    explicit Held(Object* o)
         : o_{o} {
         if (o_) {
             hoc_obj_ref(o_);
         }
     }
-    Hold(const Hold&) = delete;
-    ~Hold() {
+    Held(const Held&) = delete;
+    ~Held() {
         if (o_) {
             hoc_obj_unref(o_);
         }
     }
 };
 
-/// A call of a hook: Python runs, the object is held, HOC is at its top level. check() raises the
-/// HOC error of a hook that failed.
+/// A call of a hook: the hook is there, the object is held, HOC is at its top level. check() raises
+/// the HOC error of a hook that failed.
 class Call {
     Hook hook_;
-    Hold hold_;
+    Held held_;
     Top top_;
 
   public:
     char err[error_size];
     explicit Call(Hook hook, Object* o = nullptr)
-        : hook_{(require(), hook)}
-        , hold_{o} {
+        : hook_{(need<Function>(hook), hook)}
+        , held_{o} {
         err[0] = '\0';
     }
     template <typename F>
     F get() const {
-        return need<F>(hook_);
+        return python::get<F>(hook_);
     }
     /// Raise the hook's message if it failed (0).
     int check(int status) {
@@ -224,41 +242,8 @@ Object* temp(Object* o) {
     return o;
 }
 
-/// A PythonObject with one reference.
-Object* new_python_object(PyObject* p) {
-    py.Py_IncRef(p);
-    Object* const o = hoc_new_object(nrnpy_pyobj_sym_, p);
-    hoc_obj_ref(o);
-    return o;
-}
-
-/// The HOC object for a Python value, with a reference for the caller; null for None.
-Object* to_hoc(PyObject* p) {
-    if (p == py._Py_NoneStruct) {
-        return nullptr;
-    }
-    if (is_instance(p, types.object)) {
-        auto* const o = hoc_object(p);
-        if (o) {
-            hoc_obj_ref(o);
-        }
-        return o;
-    }
-    return new_python_object(p);
-}
-
-/// The Python value of a HOC object, a new reference. The GIL is held.
-Ref to_python(Object* o) {
-    if (!o) {
-        return Ref::borrow(py._Py_NoneStruct);
-    }
-    if (is_python_object(o)) {
-        return Ref::borrow(payload(o));
-    }
-    Call call{Hook::to_python};
-    PyObject* value{};
-    call.check(call.get<ToPython>()(o, &value, call.err, sizeof call.err));
-    return Ref{value};
+std::string text(nrn_bytes const& bytes) {
+    return {bytes.data.begin(), std::find(bytes.data.begin(), bytes.data.end(), '\0')};
 }
 
 /// A HOC string of what a hook returned. The slots outlive the expression that uses it, as
@@ -267,7 +252,7 @@ char** temp_string(nrn_bytes const& bytes) {
     static std::array<std::string, 128> slots;
     static std::size_t next{};
     auto& slot = slots[next++ % slots.size()];
-    slot.assign(bytes.data.begin(), std::find(bytes.data.begin(), bytes.data.end(), '\0'));
+    slot = text(bytes);
     char** const string = hoc_temp_charptr();
     *string = slot.data();
     return string;
@@ -280,9 +265,9 @@ void* construct(Object*) {
 }
 
 void destruct(void* p) {
-    if (p && start()) {
+    if (p && has(Hook::release)) {
         Top const top{};
-        py.Py_DecRef(static_cast<PyObject*>(p));
+        get<Release>(Hook::release)(p);
     }
 }
 
@@ -304,15 +289,29 @@ const char* assign_component(Object* o) {
 
 // ---- callbacks
 
+// Per event (NetCon.record, CVode.event, FInitializeHandler, ...). 2: the failure was only printed.
+int hoccommand_exec(Object* o) {
+    require_python_object(o, "not a Python callback");
+    Call call{Hook::command, o};
+    return call.check(call.get<Command>()(payload(o), call.err, sizeof call.err)) == 1;
+}
+
+// f(x) for each element from start to end.
+void vec_apply(IvocVect* vec, Object* f, int start, int end) {
+    require_python_object(f, "apply: first argument must be a HOC string or a Python callable");
+    Call call{Hook::apply, f};
+    call.check(call.get<Apply>()(payload(f), vec->obj_, start, end, call.err, sizeof call.err));
+}
+
 int hoccommand_exec_strret(Object* o, char* buf, int size) {
     require_python_object(o, "not a Python callback");
     Call call{Hook::call_string, o};
-    nrn_bytes text;
+    nrn_bytes out;
     // 2: the failure was only printed.
-    if (call.check(call.get<CallString>()(payload(o), &text, call.err, sizeof call.err)) == 2) {
+    if (call.check(call.get<CallString>()(payload(o), &out, call.err, sizeof call.err)) == 2) {
         return 0;
     }
-    std::strncpy(buf, std::string(text.data.begin(), text.data.end()).c_str(), size);
+    std::strncpy(buf, text(out).c_str(), size);
     buf[size - 1] = '\0';
     return 1;
 }
@@ -392,9 +391,9 @@ void gui_set(Object* o, double x) {
 int gui_get_str(Object* o, char** cpp) {
     require_python_object(o, "not a Python variable");
     Call call{Hook::variable_string, o};
-    nrn_bytes text;
-    call.check(call.get<VariableString>()(payload(o), &text, call.err, sizeof call.err));
-    std::string const string(text.data.begin(), text.data.end());
+    nrn_bytes out;
+    call.check(call.get<VariableString>()(payload(o), &out, call.err, sizeof call.err));
+    std::string const string(out.data.begin(), out.data.end());
     if (*cpp && string == *cpp) {
         return 0;
     }
@@ -404,8 +403,8 @@ int gui_get_str(Object* o, char** cpp) {
     return 1;
 }
 
-// ---- the GUI in Python: the interface's gui callback (name, the object of a
-// method, HOC's object, arguments...)
+// ---- the GUI in Python: the interface's gui callback (name, the object of a method, HOC's object,
+// arguments...)
 
 /// Push the arguments of the HOC call in progress; a pointer as a Pointer to it (a bit set in
 /// pointers).
@@ -434,7 +433,7 @@ int push_arguments(int& pointers) {
 
 /// 2 if the interface has no GUI callback.
 int call_gui(const char* name, Object* obj, bool references, Object** result, nrn_bytes* string) {
-    if (!has(Hook::gui_call) || !start()) {
+    if (!has(Hook::gui_call)) {
         return 2;
     }
     // A destructor runs when the object is freed, maybe outside any HOC call: no arguments.
@@ -465,11 +464,22 @@ Object** gui_helper3(const char* name, Object* obj, int references) {
 }
 
 char** gui_helper3_str(const char* name, Object* obj, int references) {
-    nrn_bytes text;
-    if (call_gui(name, obj, references, nullptr, &text) == 2) {
+    nrn_bytes out;
+    if (call_gui(name, obj, references, nullptr, &out) == 2) {
         return nullptr;
     }
-    return temp_string(text);
+    return temp_string(out);
+}
+
+double object_to_double(Object* o) {
+    if (!has(Hook::to_number)) {
+        return 0.;
+    }
+    Held const held{o};
+    double x{-1.};  // as -1 if it is no number, which the caller cannot tell from
+                    // a value
+    get<ToNumber>(Hook::to_number)(o, &x);
+    return x;
 }
 
 // ---- sections and locations
@@ -497,11 +507,10 @@ void o2loc2(Object* o, Section** sec, double* x) {
 }
 
 int is_segment(Object* o) {
-    if (!is_python_object(o) || !has(Hook::is_segment) || !start()) {
+    if (!is_python_object(o) || !payload(o) || !has(Hook::is_segment)) {
         return 0;
     }
-    Gil const gil{};
-    return need<IsSegment>(Hook::is_segment)(payload(o));
+    return get<IsSegment>(Hook::is_segment)(payload(o));
 }
 
 Object* new_segment(Section* sec, double x) {
@@ -524,6 +533,35 @@ void append_sections(void* list, Object* o) {
         lvappendsec_and_ref(list, sec);
     }
     call.check(status);
+}
+
+// The names and cells of the sections Python made (nrn_section_new_owned): the owner is the Python
+// Section. NEURON asks for a name once, and keeps it.
+char* section_name(Section* sec) {
+    static std::string name;
+    nrn_bytes out;
+    if (has(Hook::section_name) &&
+        get<SectionName>(Hook::section_name)(nrn_section_owner_get(sec), &out)) {
+        name = text(out);
+    } else {
+        name = fmt::format("__nrnsec_{}", fmt::ptr(sec));
+    }
+    return name.data();
+}
+
+// NEURON asks about any section; only those the interface made have an owner.
+Object* section_cell(Section* sec) {
+    Object* cell{};
+    if (void* const owner = nrn_section_owner_get(sec); owner && has(Hook::section_cell)) {
+        get<SectionCell>(Hook::section_cell)(owner, &cell);
+    }
+    return cell;
+}
+
+int section_cell_equals(Section* sec, Object* o) {
+    void* const owner = nrn_section_owner_get(sec);
+    return owner && has(Hook::section_cell_equals) &&
+           get<SectionCellEquals>(Hook::section_cell_equals)(owner, o);
 }
 
 // ---- Vector
@@ -640,7 +678,7 @@ int same_object(Object* a, Object* b) {
 // 2 from a hook: the interface keeps no state.
 void savestate_store(char** data, uint64_t* size) {
     *size = 0;
-    if (!has(Hook::savestate_store) || !start()) {
+    if (!has(Hook::savestate_store)) {
         return;
     }
     Call call{Hook::savestate_store};
@@ -656,7 +694,7 @@ void savestate_store(char** data, uint64_t* size) {
 
 void savestate_restore(int64_t size, char* data) {
     int status = 2;
-    if (has(Hook::savestate_restore) && start()) {
+    if (has(Hook::savestate_restore)) {
         Call call{Hook::savestate_restore};
         status = call.check(call.get<SavestateRestore>()(data, size, call.err, sizeof call.err));
     }
@@ -667,30 +705,30 @@ void savestate_restore(int64_t size, char* data) {
 
 // CoreNEURON's options are read while the simulator is set up: an error is printed, not raised.
 int coreneuron_option(int which) {
-    if (!has(Hook::coreneuron_option) || !start()) {
+    if (!has(Hook::coreneuron_option)) {
         return 0;
     }
     Top const top{};
     int value{};
-    need<CoreneuronOption>(Hook::coreneuron_option)(which, &value);
+    get<CoreneuronOption>(Hook::coreneuron_option)(which, &value);
     return value;
 }
 
 char* coreneuron_arg(double tstop) {
-    if (!has(Hook::coreneuron_arg) || !start()) {
+    if (!has(Hook::coreneuron_arg)) {
         return nullptr;
     }
     Top const top{};
     nrn_bytes out;
-    if (!need<CoreneuronArg>(Hook::coreneuron_arg)(tstop, &out)) {
+    if (!get<CoreneuronArg>(Hook::coreneuron_arg)(tstop, &out)) {
         return nullptr;
     }
-    return strdup(std::string(out.data.begin(), out.data.end()).c_str());
+    return strdup(text(out).c_str());
 }
 
 // What to plot for the Python object a RangeVarPlot was given: an rxd species becomes a function.
 Object* rvp_callable(Object* o) {
-    if (!is_python_object(o) || !has(Hook::rvp_callable) || !start()) {
+    if (!is_python_object(o) || !has(Hook::rvp_callable)) {
         return o;
     }
     Call call{Hook::rvp_callable, o};
@@ -701,60 +739,34 @@ Object* rvp_callable(Object* o) {
     return temp(result);
 }
 
-// PlotShape's Python variable.
+// Windows: wait for the GUI thread, which calls Python. The interface calls wait without the GIL
+// (and without its HOC lock).
+void without_gil(void (*wait)(void*), void* arg) {
+    if (has(Hook::wait)) {
+        get<Wait>(Hook::wait)(wait, arg);
+    } else {
+        wait(arg);
+    }
+}
+
+// PlotShape's Python variable: a reference to what the PythonObject holds.
 void* plotshape_object(Object* o) {
-    if (!is_python_object(o) || !start()) {
-        return nullptr;
+    void* held{};
+    if (is_python_object(o) && has(Hook::hold)) {
+        get<Hold>(Hook::hold)(payload(o), &held);
     }
-    Gil const gil{};
-    return Ref::borrow(payload(o)).release();
+    return held;
 }
 
-void plotshape_release(void* p) {
-    if (p && start()) {
-        Top const top{};
-        py.Py_DecRef(static_cast<PyObject*>(p));
-    }
-}
-
-// Without the interface (HOC's own nrnpython("import webbrowser") must not import neuron), the
-// statement runs here, and an error is printed as python prints it.
+// nrnpython(): with no interface (HOC's own nrnpython("import webbrowser") must not import neuron)
+// the launcher's statement hook runs it, and an error is printed as python prints it.
 void nrnpython_statement() {
     int ok{};
-    if (start() && has(Hook::statement)) {
+    if (start()) {
         Call call{Hook::statement};
         call.check(call.get<Statement>()(gargstr(1), &ok, call.err, sizeof call.err));
-    } else if (started()) {
-        Top const top{};
-        ok = static_cast<bool>(run(gargstr(1)));
-        if (!ok) {
-            py.PyErr_Print();
-        }
     }
     hoc_retpushx(ok);
-}
-
-// Windows: this thread waits for the GUI's, which calls Python and HOC. The interface releases its
-// lock as often as this thread holds it, and takes it as often again.
-PyThreadState* save_thread() {
-    if (!started()) {
-        return nullptr;
-    }
-    if (has(Hook::wait_begin)) {
-        Gil const gil{};
-        need<Wait>(Hook::wait_begin)();
-    }
-    return py.PyEval_SaveThread();
-}
-
-void restore_thread(PyThreadState* state) {
-    if (!state) {
-        return;
-    }
-    py.PyEval_RestoreThread(state);
-    if (has(Hook::wait_end)) {
-        need<Wait>(Hook::wait_end)();
-    }
 }
 }  // namespace
 
@@ -762,21 +774,21 @@ bool is_python_object(Object* o) {
     return o && o->ctemplate->sym == nrnpy_pyobj_sym_;
 }
 
-PyObject* payload(Object* o) {
-    auto* const object = static_cast<PyObject*>(o->u.this_pointer);
-    return object ? object : py.PyImport_AddModule("__main__");
+void* payload(Object* o) {
+    return o->u.this_pointer;
 }
 
 void require_python_object(Object* o, const char* message) {
     if (!is_python_object(o)) {
         hoc_execerror(message, nullptr);
     }
-    require();
+    if (!start()) {
+        hoc_execerror("Python not available", nullptr);
+    }
 }
 
 Top::Top()
     : object_{hoc_thisobject} {
-    model_changed();
     if (object_) {
         exceptions_ = std::uncaught_exceptions();
         oc_save_hoc_oop(&object_, &data_, &local_, &symbols_);
@@ -793,39 +805,12 @@ Top::~Top() {
     }
 }
 
-void callback_failed(int kind) {
-    PyObject *t{}, *v{}, *tb{};
-    py.PyErr_Fetch(&t, &v, &tb);
-    py.PyErr_NormalizeException(&t, &v, &tb);
-    if (tb) {
-        py.PyException_SetTraceback(v, tb);
-    }
-    Ref type{t}, value{v}, traceback{tb};
-    char err[error_size]{};
-    if (!has(Hook::callback_failed)) {
-        py.PyErr_Restore(type.release(), value.release(), traceback.release());
-        py.PyErr_Print();
-        hoc_execerror("Python callback failed", nullptr);
-    }
-    if (need<CallbackFailed>(Hook::callback_failed)(kind, value.get(), err, sizeof err) == 1) {
-        return;
-    }
-    hoc_execerror(err[0] ? err : "Python callback failed", nullptr);
-}
-
 void clear_hooks() {
     std::fill(std::begin(hooks), std::end(hooks), nullptr);
 }
 
-void hoc_error_from_python(const std::string& message) {
-    py.PyErr_Print();
-    hoc_execerror(message.c_str(), nullptr);
-}
-
-void require() {
-    if (!start()) {
-        hoc_execerror("Python not available", nullptr);
-    }
+bool launcher_hook(const char* what, const char* arg) {
+    return has(Hook::launcher) && get<Launcher>(Hook::launcher)(what, arg);
 }
 
 void register_python_object() {
@@ -844,36 +829,23 @@ void register_python_object() {
     methods.gui_helper = [](const char* name, Object* obj) { return gui_helper3(name, obj, 0); };
     methods.gui_helper3 = gui_helper3;
     methods.gui_helper3_str = gui_helper3_str;
-    methods.object_to_double = [](Object* o) {
-        if (!started() || !has(Hook::to_number)) {
-            return 0.;
-        }
-        Gil const gil{};
-        Ref const value = to_python(o);
-        double x{-1.};  // as -1 if it is no number, which the caller cannot tell
-                        // from a value
-        need<ToNumber>(Hook::to_number)(value.get(), &x);
-        return x;
-    };
+    methods.object_to_double = object_to_double;
     methods.hoccommand_exec_strret = hoccommand_exec_strret;
     methods.hoc_nrnpython = nrnpython_statement;
-    methods.ho2po = [](Object* o) { return to_python(o).release(); };
     methods.mpi_alltoall_type = collective;
     methods.opaque_obj2pyobj = opaque_object;
     methods.pickle2po = pickle2po;
-    methods.po2ho = to_hoc;
     methods.po2pickle = po2pickle;
     methods.praxis_efun = praxis_efun;
     methods.pysame = same_object;
-    methods.restore_thread = restore_thread;
-    methods.save_thread = save_thread;
+    methods.without_gil = without_gil;
     nrnpy_call_obj_method = [](Object* o, const char* method, Object* other) {
         return call_method(o, method, other, false, 0.);
     };
     nrnpy_call_obj_method_double = [](Object* o, const char* method, double x) {
         return call_method(o, method, nullptr, true, x);
     };
-    nrnpy_decref = plotshape_release;
+    nrnpy_decref = destruct;
     nrnpy_get_pyobj = plotshape_object;
     nrnpy_nrncore_arg_p_ = coreneuron_arg;
     nrnpy_nrncore_enable_value_p_ = [] { return coreneuron_option(0); };
@@ -890,7 +862,9 @@ void register_python_object() {
     nrnpy_vec_as_numpy_helper_ = vec_as_numpy;
     nrnpy_vec_from_python_p_ = vec_from_python;
     nrnpy_vec_to_python_p_ = vec_to_python;
-    fast::register_callbacks();
+    nrnpy_hoccommand_exec = methods.hoccommand_exec = hoccommand_exec;
+    nrnpy_vec_apply_p_ = vec_apply;
+    nrnpy_tree_changed_p_ = tree_changed;
 }
 
 }  // namespace neuron::python
@@ -904,8 +878,12 @@ int nrn_python_hook_set(const char* name,
     for (int i = 0; i < static_cast<int>(Hook::count); ++i) {
         if (name && hook_name(static_cast<Hook>(i)) == name) {
             hooks[i] = hook;
-            hooks_registered = hooks_registered || hook;
-            fast::forget_classes();
+            // Python's sections are owned by their objects, which HOC asks for names and cells.
+            static bool owners{};
+            if (hook && !owners) {
+                owners = nrn_section_owner_hooks_set(
+                    section_name, section_cell, section_cell_equals, nullptr, 0);
+            }
             return 0;
         }
     }
@@ -922,50 +900,37 @@ void nrn_bytes_set(nrn_bytes* out, const char* data, size_t size) {
     out->data.assign(data, data + size);
 }
 
-Object* nrn_python_object_new(PyObject* value) {
-    return start() ? new_python_object(value) : nullptr;
+Object* nrn_python_object_new(void* value) {
+    Object* const o = hoc_new_object(nrnpy_pyobj_sym_, value);
+    hoc_obj_ref(o);
+    return o;
 }
 
-PyObject* nrn_python_object_get(Object* obj) {
-    if (!start()) {
-        return nullptr;
+int nrn_python_object_get(Object* obj, void** value) {
+    if (!is_python_object(obj)) {
+        return 0;
     }
-    if (!obj) {
-        return Ref::borrow(py._Py_NoneStruct).release();
-    }
-    return is_python_object(obj) ? Ref::borrow(payload(obj)).release() : nullptr;
+    *value = payload(obj);
+    return 1;
 }
 
-PyObject* nrn_python_type(const char* name) {
-    if (!start() || !make_types()) {
-        return nullptr;
+// For NEURON's GUI in Python (neuron/__init__.py), with the GIL. 1: the interface has not
+// registered its hooks.
+int nrnpy_set_gui_callback(void* callback) {
+    if (!has(Hook::gui_call) || !has(Hook::hold)) {
+        return callback ? 1 : 0;
     }
-    auto* const type = !name                                                ? py._Py_NoneStruct
-                       : !std::strcmp(name, "object")                       ? types.object
-                       : !std::strcmp(name, "section")                      ? types.section
-                       : !std::strcmp(name, "segment")                      ? types.segment
-                       : !std::strcmp(name, "mechanism") && types.mechanism ? types.mechanism
-                       : !std::strcmp(name, "vector") && types.vector       ? types.vector
-                                                                            : py._Py_NoneStruct;
-    return Ref::borrow(type).release();
-}
-
-// Called from Python, with the GIL. 1: the interface has not registered its hooks.
-int nrnpy_set_gui_callback(PyObject* callback) {
-    if (!started()) {
-        return 3;
-    }
-    bool const none = !callback || callback == py._Py_NoneStruct;
-    if (!has(Hook::gui_call)) {
-        return none ? 0 : 1;
-    }
-    Object* const o = none ? nullptr : new_python_object(callback);
+    // A PythonObject of its own: the hook keeps what it needs.
+    void* held{};
+    Object* const o = callback && get<Hold>(Hook::hold)(callback, &held)
+                          ? nrn_python_object_new(held)
+                          : nullptr;
     char err[error_size];
     Object* result{};
-    int const status = reinterpret_cast<GuiCall>(hooks[static_cast<int>(Hook::gui_call)])(
-        nullptr, o, nullptr, 0, 0, 0, 0, &result, nullptr, err, sizeof err);
+    int const status = get<GuiCall>(
+        Hook::gui_call)(nullptr, o, nullptr, 0, 0, 0, 0, &result, nullptr, err, sizeof err);
     if (o) {
-        hoc_obj_unref(o);  // the interface keeps its own
+        hoc_obj_unref(o);
     }
     return status == 1 ? 0 : 2;
 }

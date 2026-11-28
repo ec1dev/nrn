@@ -2,22 +2,16 @@
 #include "nrndlldef.h"
 #include <cstdint>
 #include <string>
-#include <string_view>
 #include <vector>
 /**
- * The functions with which HOC and the simulator call Python. nrnpy_object.cpp sets most of them
- * when NEURON starts.
+ * The functions with which HOC and the simulator call Python. nrnpy_hooks.cpp
+ * sets most of them when NEURON starts; they call what the interface registers
+ * (nrn_python_hook_set).
  */
 struct Object;
 // methods.hoccommand_exec, for MOD VERBATIM (e.g. test/rxd/beforestep_py.mod), which imports this
 // from nrniv.dll.
 extern NRN_DLLSYM int (*nrnpy_hoccommand_exec)(Object*);
-// PyObject is a typedef, so we can't forward-declare it as a type. This pattern is common enough in
-// the wild that we hope Python won't dare change it.
-struct _object;
-typedef _object PyObject;
-struct _ts;
-typedef _ts PyThreadState;
 struct Section;
 struct Symbol;
 class IvocVect;
@@ -37,20 +31,18 @@ struct impl_ptrs {
     int (*hoccommand_exec)(Object*){};
     int (*hoccommand_exec_strret)(Object*, char*, int){};
     void (*hoc_nrnpython)(){};
-    PyObject* (*ho2po)(Object*){};
-    void (*interpreter_set_path)(std::string_view){};
+    void (*interpreter_set_path)(){};
     void (*interpreter_finalize)(){};
     int (*interpreter_run)(){};
     Object* (*mpi_alltoall_type)(int, int){};
     double (*object_to_double)(Object*){};
     void* (*opaque_obj2pyobj)(Object*){};
     Object* (*pickle2po)(const std::vector<char>&){};
-    Object* (*po2ho)(PyObject*){};
     std::vector<char> (*po2pickle)(Object*){};
     double (*praxis_efun)(Object* pycallable, Object* hvec){};
     int (*pysame)(Object* o1, Object* o2){};
-    void (*restore_thread)(PyThreadState*){};
-    PyThreadState* (*save_thread)(){};
+    /// Windows: wait(arg), while Python's other threads go on (the GUI thread calls Python).
+    void (*without_gil)(void (*wait)(void*), void* arg){};
     // Such a common pattern it gets a wrapper
     Object** try_gui_helper(const char* name, Object* obj) const {
         if (gui_helper) {
@@ -61,6 +53,32 @@ struct impl_ptrs {
     }
 };
 extern impl_ptrs methods;
+
+// What nrnpy_capi.cpp and nrnpy_launch.cpp do with CPython, for the rest of NEURON.
+/// Is Python running? Starts it if NEURON may (nrniv), the first time; false once it has been
+/// finalized.
+bool start();
+/// HOC's quit(): finalize Python, in the thread that brought NEURON and Python together.
+void finalize();
+/// Start Python, when NEURON, not Python, is the main program (nrnpy.cpp).
+extern bool (*launch)();
+/// A function or variable of the Python in library (a dlopen handle), or of the one this process
+/// has loaded if it is null; null if there is none (nrnpy.cpp).
+void* python_symbol(void* library, const char* name);
+/// Import the neuron package, which registers the interface's hooks. Set by the launcher.
+extern bool (*import_interface)();
+/// NRN_PYTHON_FAST_PATH is not "0" (exactly, as NEURON compares its other switches).
+bool fast_path_enabled();
+/// The model may have changed: what the fast path keeps about it is out of date (nrnpy_fast.cpp).
+void tree_changed();
+
+// And what nrnpy_hooks.cpp does for them.
+/// Python is about to be finalized: no hook is called any more.
+void clear_hooks();
+/// What neuron/_launch.py does for nrniv -python: run_file, run_command (-c), prompt (NEURON's
+/// reader, also for input()), interact, set_path, import_neuron. False if it failed (it printed
+/// the error) or is not there.
+bool launcher_hook(const char* what, const char* arg);
 }  // namespace neuron::python
 
 extern NRN_DLLSYM Symbol* nrnpy_pyobj_sym_;

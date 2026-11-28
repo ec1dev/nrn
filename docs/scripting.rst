@@ -114,8 +114,13 @@ Python's settings outside the stable ABI:
       ``python -S``. Without it the option prints a warning, and ``site`` is imported.
     * ``PyOS_ReadlineFunctionPointer``, with ``PyMem_RawMalloc`` for the lines it returns:
       at the ``>>>`` prompt and in ``input()``, NEURON reads the line and runs its events
-      (the GUI) while it waits. Without either, Python reads the line itself, and the GUI
-      does not respond while Python waits for input.
+      (the GUI) while it waits. ``neuron/_launch.py`` sets it, through ``ctypes``, to a
+      reader that calls ``nrn_hoc_readline``. Without either, Python reads the line itself,
+      and the GUI does not respond while Python waits for input.
+
+    The C part of ``nrniv -python`` (``src/nrniv/nrnpy_launch.cpp``) only sets the first
+    two, starts the interpreter and runs ``neuron/_launch.py``, which does the rest: scripts,
+    ``-c``, the prompt, and ``nrnpython()`` before the ``neuron`` package is imported.
 
 ``-pyexe`` and ``NRN_PYTHONEXE``:
     The NEURON executables also accept a ``-pyexe`` argument, which governs

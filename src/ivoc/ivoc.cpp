@@ -497,7 +497,9 @@ void hoc_notify_iv() {
 #ifdef _WIN32
         if (!nrn_is_gui_thread()) {
             // allow gui thread to run
-            neuron::python::methods.restore_thread(neuron::python::methods.save_thread());
+            if (neuron::python::methods.without_gil) {
+                neuron::python::methods.without_gil([](void*) {}, nullptr);
+            }
             hoc_pushx(0.);
             hoc_ret();
             return;

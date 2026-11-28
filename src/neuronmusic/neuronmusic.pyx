@@ -1,4 +1,5 @@
 from neuronmusic cimport *
+from neuron._interface.utils import _wrap_owned_object
 
 cdef class EventOutputPort:
     cdef cxx_EventOutputPort* cxx # hold a C++ instance which we're wrapping
@@ -29,8 +30,10 @@ cdef class EventInputPort:
         del_EventInputPort (self.cxx)
 
     def index2target (self, int gi, target):
+        # target is a point process; the result its NetCon. NEURON's interface has their HOC
+        # objects' addresses, and wraps the new NetCon's.
         if self.cxx != NULL:
-            return self.cxx.index2target (gi, target)
+            return _wrap_owned_object (<size_t> self.cxx.index2target (gi, <void*> <size_t> target._obj))
         else:
             return False
 

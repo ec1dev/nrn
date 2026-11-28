@@ -1,8 +1,12 @@
-// nrn_python_hook_set's answers, and nrn_hoc_error_is_returned where HOC errors are caught. The
-// hooks themselves need Python; test/unit_tests/hoc_python/test_python_hooks.py calls them.
+// nrn_python_hook_set's answers, nrn_hoc_error_is_returned where HOC errors are caught, the
+// section owner hooks left out for HOC's sections, what a PythonObject holds, and
+// nrn_hoc_readline. The hooks themselves need Python;
+// test/unit_tests/hoc_python/test_python_hooks.py calls them.
 #include "neuronapi.h"
 #include <array>
+#include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <iostream>
 #include <string>
 
@@ -26,6 +30,19 @@ static void probe() {
 }
 
 static void hook() {}
+
+static int owner_calls;
+
+static int section_cell(void*, Object** result) {
+    ++owner_calls;
+    *result = nullptr;
+    return 1;
+}
+
+static int section_cell_equals(void*, Object*) {
+    ++owner_calls;
+    return 0;
+}
 
 int main() {
     std::array<const char*, 4> args = {"python_hooks", "-nogui", "-nopython", nullptr};
@@ -57,6 +74,54 @@ int main() {
     returned = -1;
     check(nrn_hoc_call("probe()") == 0 && returned == 0, "in nrn_hoc_call");
     check(nrn_hoc_error_is_returned() == 0, "after the calls");
+
+    // The section owner hooks are not asked about a section HOC made (it has no owner).
+    check(nrn_python_hook_set("section_cell",
+                              reinterpret_cast<void (*)()>(section_cell),
+                              error,
+                              sizeof error) == 0 &&
+              nrn_python_hook_set("section_cell_equals",
+                                  reinterpret_cast<void (*)()>(section_cell_equals),
+                                  error,
+                                  sizeof error) == 0,
+          "set the section hooks");
+    for (char const* const statement: {"create plain",
+                                       "objref nil, syn, nc, cells",
+                                       "plain syn = new ExpSyn(.5)",
+                                       "nc = new NetCon(nil, syn)",
+                                       "cells = nc.postcelllist()",
+                                       "plain cells = section_owner()"}) {
+        check(nrn_hoc_call_nothrow(statement) == 0, statement);
+    }
+    check(owner_calls == 0, "no owner hook for a HOC section");
+    nrn_python_hook_set("section_cell", nullptr, error, sizeof error);
+    nrn_python_hook_set("section_cell_equals", nullptr, error, sizeof error);
+
+    // A PythonObject holds what it was given; without a release hook it only lets go of it.
+    int held{};
+    void* value = &failures;
+    Object* const o = nrn_python_object_new(&held);
+    check(nrn_python_object_get(o, &value) == 1 && value == &held, "what a PythonObject holds");
+    Object* const vector = nrn_object_new(nrn_symbol("Vector"), 0);
+    value = &failures;
+    check(nrn_python_object_get(vector, &value) == 0 && value == &failures, "not a PythonObject");
+    check(nrn_python_object_get(nullptr, &value) == 0, "no object");
+    nrn_object_unref(vector);
+    nrn_object_unref(o);
+
+    // HOC's reader, of stdin here: a line, the last one, then "" at the end.
+    if (std::FILE* const input = std::fopen("python_hooks_input.txt", "w")) {
+        std::fputs("first line\nlast", input);
+        std::fclose(input);
+    }
+    check(std::freopen("python_hooks_input.txt", "r", stdin) != nullptr, "stdin from a file");
+    char const* line = nrn_hoc_readline("prompt> ");
+    check(line && std::strcmp(line, "first line\n") == 0, "a line");
+    line = nrn_hoc_readline("prompt> ");
+    check(line && std::strcmp(line, "last\n") == 0,
+          std::string{"the last line: "} + (line ? line : "NULL"));
+    line = nrn_hoc_readline("prompt> ");
+    check(line && !*line, "the end of the input");
     if (!failures) {
         std::cout << "OK\n";
     }

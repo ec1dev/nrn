@@ -5,20 +5,20 @@ How-Do-I Guide
 Working with Object and PyObject
 ================================
 
-NEURON does not include :file:`Python.h`. The CPython functions it calls are looked up in the running
-interpreter; they are listed in :file:`src/nrniv/nrnpy_capi.h`, and all of them are in the stable ABI.
-The launcher (:file:`src/nrniv/nrnpy_launch.cpp`) also looks up a few interpreter globals outside it, each
-optional (:doc:`/scripting`, "Python's settings outside the stable ABI"). Little C++ calls them: the base types of the interface's wrappers
-(:file:`src/nrniv/nrnpy_types.cpp`), its fast path and the two callbacks that run per event and per
-element (:file:`src/nrniv/nrnpy_fast.cpp`), in ``namespace neuron::python``, with the GIL held (``Gil``)
-and each new reference in a ``Ref``.
+NEURON does not include :file:`Python.h`, and calls CPython only in two files: the base types of the
+interface's wrappers with its fast path (:file:`src/nrniv/nrnpy_fast.cpp`), and the start of ``nrniv
+-python`` (:file:`src/nrniv/nrnpy_launch.cpp`). The CPython functions they call are looked up in the
+running interpreter, are listed in :file:`src/nrniv/nrnpy_capi.h`, and are all in the stable ABI; the
+launcher also looks up two interpreter globals outside it, each optional (:doc:`/scripting`, "Python's
+settings outside the stable ABI"). Together they are at most 500 lines of code.
 
 Everything else that HOC and the simulator ask of Python is done by the Python interface, through the
-C functions it registers with :c:func:`nrn_python_hook_set`. :file:`src/nrniv/nrnpy_hooks.cpp` adapts
-the core's calls to them; code elsewhere calls it through a function pointer declared in
-:file:`src/nrniv/nrnpy.h` that ``register_python_object()`` sets, and must first check that the pointer is
-not NULL: it is in a build without Python. Python itself starts when one of these functions first needs
-it, and an unset hook imports ``neuron`` once.
+plain C functions it registers with :c:func:`nrn_python_hook_set`. :file:`src/nrniv/nrnpy_hooks.cpp`
+adapts the core's calls to them, and calls no CPython: a Python object is a ``void*`` there. Code
+elsewhere calls it through a function pointer declared in :file:`src/nrniv/nrnpy.h` that
+``register_python_object()`` sets, and must first check that the pointer is not NULL: it is in a build
+without Python. Python itself starts when one of these functions first needs it, and an unset hook
+imports ``neuron`` once.
 
 
 To check if a NEURON object is wrapping a PyObject
@@ -31,23 +31,14 @@ Use ``is_python_object(obj)`` (:file:`src/nrniv/nrnpy_hooks.h`), which checks
         obj->ctemplate->sym == nrnpy_pyobj_sym_
 
 (See object types below for more about detecting the type of an ``Object*``.) ``payload(obj)`` is what it
-holds, borrowed.
+holds, borrowed, as a ``void*`` (NULL for HOC's ``new PythonObject()``, which stands for ``__main__``).
 
 
-To encapsulate a NEURON Object in a PyObject
---------------------------------------------
+To give Python a NEURON Object, or HOC a Python object
+-------------------------------------------------------
 
-Use ``methods.ho2po``. If the NEURON object is wrapping a ``PyObject`` it returns the original
-``PyObject``. Otherwise the interface makes a wrapper (the ``to_python`` hook).
-
-
-To encapsule a PyObject in a NEURON Object
-------------------------------------------
-
-Use ``methods.po2ho``. If the object is wrapping a NEURON Object, it increments the NEURON object's
-reference count by 1 and returns the original NEURON object. Otherwise it returns a new NEURON Object*
-wrapping the ``PyObject``, even for strings and floats that would be more naturally represented in
-NEURON as their respective datatypes.
+The interface does it: a hook gets an ``Object*`` and makes its own wrapper, and returns an ``Object*``
+with a reference (its wrapper's object, or a new ``PythonObject``, :c:func:`nrn_python_object_new`).
 
 To reference a NEURON Object
 ----------------------------

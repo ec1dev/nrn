@@ -93,6 +93,19 @@ static double hoc_value(const char* name) {
     return *nrn_symbol_dataptr(nrn_symbol(name));
 }
 
+static int frozen_status = -1;
+static Section* frozen_section;
+static char frozen_error[256];
+
+static void make_owned_while_frozen() {
+    frozen_status = nrn_section_new_owned_nothrow(&owner_a,
+                                                  &frozen_section,
+                                                  frozen_error,
+                                                  sizeof(frozen_error));
+    nrn_hoc_ret();
+    nrn_double_push(0.);
+}
+
 int main(void) {
     static std::array<const char*, 4> argv = {"section_owner", "-nogui", "-nopython", nullptr};
     nrn_init(3, argv.data());
@@ -107,6 +120,10 @@ int main(void) {
 
     ok &= check(nrn_section_new_owned(&owner_a) == nullptr,
                 "no owned section before the hooks are installed");
+    auto* refused = reinterpret_cast<Section*>(&owner_a);  // not null: the call sets it
+    ok &= check(nrn_section_new_owned_nothrow(&owner_a, &refused, err, sizeof(err)) == 1 &&
+                    !refused && std::strstr(err, "not installed") != nullptr,
+                "nothrow: the hooks are not installed");
     ok &= check(!nrn_section_owner_hooks_set(
                     section_name, nullptr, section_cell_equals, err, sizeof(err)) &&
                     std::strstr(err, "required") != nullptr,
@@ -128,6 +145,14 @@ int main(void) {
     ok &= check(nrn_section_owner_get(owned) == &owner_a, "nrn_section_owner_get");
     ok &= check(std::strcmp(nrn_secname(owned), "cellA.soma") == 0, "name comes from the hook");
     ok &= check(call_double("section_count", ok) == 1.0, "section is in the section list");
+
+    // While NEURON's data is frozen it refuses a new section: the nothrow form says so.
+    nrn_register_function(make_owned_while_frozen, "make_owned_while_frozen", 280);
+    nrn_hoc_call(
+        "objref fih\nfih = new FInitializeHandler(\"make_owned_while_frozen()\")\n"
+        "finitialize(-65)\nobjref fih\n");
+    ok &= check(frozen_status == 1 && !frozen_section && std::strstr(frozen_error, "frozen"),
+                "nothrow: frozen data");
 
     // Sections NEURON owns itself have no owner.
     Section* plain = nrn_section_new("plain");
@@ -175,10 +200,11 @@ int main(void) {
                     std::strstr(err, "owned sections exist") != nullptr,
                 "clear is refused while an owned section exists");
 
-    // The owner going away frees the section; release asks the name hook once more.
+    // The owner going away frees the section. NEURON asked for the name when it made the section,
+    // and kept it: release, which removes the _pysec entry, does not call the hook.
     name_calls = 0;
     nrn_section_owned_release(owned);
-    ok &= check(name_calls == 1, "release asks the name hook for the _pysec entry");
+    ok &= check(name_calls == 0, "release keeps the name hook out");
     owned = nullptr;
     ok &= check(call_double("section_count", ok) == 1.0, "release frees the section");
     nrn_hoc_call("pysec_L = 0\n_pysec.cellA.soma { pysec_L = L }\n");
@@ -195,9 +221,8 @@ int main(void) {
     nrn_section_pop();
     nrn_section_owned_release(owned);
 
-    // Once HOC has used the _pysec lookup, the name hook runs inside
-    // nrn_section_new_owned, before the caller has the Section*; it finds its
-    // owner with nrn_section_owner_get.
+    // The name hook runs once, inside nrn_section_new_owned, before the caller
+    // has the Section*; it finds its owner with nrn_section_owner_get.
     name_calls = 0;
     owned = nrn_section_new_owned(&owner_a);
     ok &= check(name_calls == 1, "the name hook runs during creation");

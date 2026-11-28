@@ -1125,7 +1125,7 @@ int hoc_moreinput() {
         // nrnpython(...), so the Python interpreter needs to be configured appropriately for
         // that (i.e. sys.path[0] = '').
         if (neuron::python::methods.interpreter_set_path) {
-            neuron::python::methods.interpreter_set_path({});
+            neuron::python::methods.interpreter_set_path();
         }
         err = hoc_oc(hs->buf);
         hoc_print_first_instance = hpfi;
@@ -1166,7 +1166,7 @@ int hoc_moreinput() {
         // scripts, in contrast to Python scripts where we strive to make `nrniv foo.py` and
         // `python foo.py` behave in the same way.
         if (neuron::python::methods.interpreter_set_path) {
-            neuron::python::methods.interpreter_set_path({});
+            neuron::python::methods.interpreter_set_path();
         }
     }
     return 1;

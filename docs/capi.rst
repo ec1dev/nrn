@@ -98,12 +98,11 @@ Sections
     Only one set of hooks can be installed at a time. Each hook gets the
     ``Section*``; :c:func:`nrn_section_owner_get` gives its owner.
 
-    :param name: Returns the section's name, such as ``"cell.soma"``. Called only
-        for owned sections, and can be called inside :c:func:`nrn_section_new_owned`
-        (before it returns) and :c:func:`nrn_section_owned_release`. It must not
-        return ``NULL``, the string must stay valid until the next call, and a
-        section's name must not change while it is owned (the ``_pysec`` lookup
-        is keyed by it). Keep it under 190 characters: core copies it into fixed
+    :param name: Returns the section's name, such as ``"cell.soma"``. Called once
+        for each owned section, inside :c:func:`nrn_section_new_owned` (before it
+        returns); NEURON keeps the name until :c:func:`nrn_section_owned_release`.
+        It must not return ``NULL``, and the string must stay valid until the next
+        call. Keep it under 190 characters: core copies it into fixed
         buffers. A section without a name must be named
         ``__nrnsec_0x<address>``; such
         sections are left out of the ``_pysec`` lookup.
@@ -146,6 +145,17 @@ Sections
 
     Call :c:func:`nrn_section_owned_release` when the owner is destroyed.
 
+.. c:function:: int nrn_section_new_owned_nothrow(void* owner, Section** result, char* error_msg, size_t error_msg_size)
+
+    :c:func:`nrn_section_new_owned`, where NEURON's refusal, for example while its data is
+    frozen (in a :class:`FInitializeHandler`), is a status and a message, not an exception.
+
+    :param owner: As :c:func:`nrn_section_new_owned`.
+    :param result: The new section, or ``NULL``.
+    :param error_msg: A buffer for the message, or ``NULL``.
+    :param error_msg_size: Its size.
+    :returns: 0 on success, 1 otherwise.
+
 .. c:function:: void* nrn_section_owner_get(Section* sec)
 
     The owner a section was created with, for the hooks: it is available
@@ -160,7 +170,8 @@ Sections
     Release a section created with :c:func:`nrn_section_new_owned` when its owner
     is destroyed. The section is freed; if HOC already deleted it
     (``delete_section``), only the reference HOC kept for the owner is dropped.
-    The name hook is called once more, to remove the ``_pysec`` entry.
+    Its ``_pysec`` entry goes with it, under the name NEURON kept: the name hook is not
+    called.
 
     :param sec: The section, or ``NULL`` (no effect).
 
@@ -2071,45 +2082,12 @@ hooks. When no provider is registered, ordinary template lookup is unchanged.
 Python
 ------
 
-For a Python interface to NEURON, in a build with ``NRN_ENABLE_PYTHON``. NEURON
-calls Python itself, through the functions of the running interpreter: a HOC
-``PythonObject`` (its attributes, items, methods and operators), callbacks such as
-:class:`FInitializeHandler`'s, and Python arguments of NEURON's own functions. The
-interface derives its classes of HOC objects, sections and segments from
-:c:func:`nrn_python_type`'s and registers them.
-
-These functions, except ``nrn_python_hook_set``, ``nrn_bytes_set`` and
-``nrn_hoc_error_is_returned``, must be called with the GIL held, and return NULL if
-there is no Python.
-
-.. c:function:: PyObject* nrn_python_type(const char* name)
-
-    The base type of the interface's classes of ``"object"``, ``"section"`` or
-    ``"segment"``. It has the slots, so that NEURON reads instances, and releases what
-    they hold when they are freed. All but the first ones are the interface's own.
-
-    =============  ================================  ==========================================
-    type           slots                             released with an instance
-    =============  ================================  ==========================================
-    ``object``     ``_obj`` (``Object*``, an int),   its reference to the object
-                   ``_class_name``, ``_methods``,
-                   ``_section_cache``,
-                   ``_plotshape_var``
-    ``section``    ``_sec`` (``Section*``, an        the section, if ``_pynative`` is True;
-                   int), ``_pynative``, ``_cell``,   otherwise its reference to the section,
-                   ``_inserted_mechs``,              which HOC made
-                   ``_inserted_mechs_epoch``
-    ``segment``    ``_sec`` (a section instance),    nothing more
-                   ``_x``, ``_mech_cache``
-    =============  ================================  ==========================================
-
-    NEURON makes segments itself only for ``for seg in sec`` (the fast path), of the
-    class the interface sets as the segment type's ``_fast_segment_class``.
-    The section type's ``__init__(name, cell)`` makes a section, which goes with the
-    instance; ``name`` is bytes, with the cell's name, or None, and ``cell`` a weak
-    reference or None. The segment type's is ``__init__(sec, x)``.
-
-    :returns: A new reference, to None for another name.
+For a Python interface to NEURON, in a build with ``NRN_ENABLE_PYTHON``. NEURON does
+not call CPython for it: what a HOC ``PythonObject`` does (its attributes, items, methods
+and operators), callbacks such as :class:`FInitializeHandler`'s, and Python arguments of
+NEURON's own functions are the interface's hooks, plain C functions that it registers
+with :c:func:`nrn_python_hook_set`. A Python object is a ``void*`` here, which only the
+interface reads. These functions do not need the GIL.
 
 .. c:function:: int nrn_python_hook_set(const char* name, void (*hook)(void), char* error_msg, size_t error_msg_size)
 
@@ -2122,55 +2100,63 @@ there is no Python.
     NEURON raises it as a HOC error after the hook has returned (``Python hook <name>
     failed`` if it is empty). Where a hook says so, 2 and 3 say more. A hook that failed
     leaves the HOC stack as it found it, except those that pop their arguments
-    (``narg``), which pop them all. A ``PyObject*`` argument is borrowed: what the
-    ``PythonObject`` holds (``__main__`` for HOC's ``new PythonObject()``), which NEURON keeps
-    for the call; ``Object*`` and ``Section*`` arguments are borrowed too. An ``Object**``
-    result has one reference, owned by NEURON, or NULL for None. ``const char* data,
-    size_t size`` is valid for the call only. A ``nrn_bytes*`` result is filled with
-    :c:func:`nrn_bytes_set`. NEURON calls a hook with the GIL held, only while Python
-    runs, and with HOC at its top level. A hook that is not set when NEURON needs it
-    imports ``neuron`` once; without it the HOC error is "The neuron package did not
-    register its Python hooks". Python ends the model epoch of the interface (the list
-    ``_fast_epoch`` of the segment type) whenever NEURON calls a hook.
+    (``narg``), which pop them all. A ``void* held`` is what the ``PythonObject`` holds,
+    borrowed (NULL for HOC's ``new PythonObject()``, which stands for ``__main__``); NEURON
+    keeps the ``PythonObject`` for the call. ``Object*`` and ``Section*`` arguments are
+    borrowed too. An ``Object**`` result has one reference, owned by NEURON, or NULL for None.
+    ``const char* data, size_t size`` is valid for the call only. A ``nrn_bytes*`` result is
+    filled with :c:func:`nrn_bytes_set`. NEURON calls a hook in any thread, without taking
+    the GIL (a ctypes callback takes it), and, unless noted, with HOC at its top level. A
+    hook that is not set when NEURON needs it imports ``neuron`` once (``nrniv``); without it
+    the HOC error is "The neuron package did not register its Python hooks". The interface
+    clears its hooks before Python is finalized.
 
     ======================== ==================================================================
     name                     signature, and what it does
     ======================== ==================================================================
     ``component``            ``(Object* o, void* held, const char* name, int nindex, int
                              isfunc, ERR)``: HOC reads ``o.name``, ``o.name(...)`` or
-                             ``o._[i]`` (:c:func:`nrn_template_set_component_hooks`).
-                             ``held`` is NULL for ``new PythonObject()``. 3: an item could not
-                             be got, and NEURON adds the object's name to the message
+                             ``o._[i]`` (:c:func:`nrn_template_set_component_hooks`). 3: an
+                             item could not be got, and NEURON adds the object's name to the
+                             message
     ``component_assign``     ``(Object* o, void* held, ERR)``: HOC assigns to ``o.name`` or
                              ``o._[i]``
-    ``to_python``            ``(Object* o, PyObject** result, ERR)``: a new reference to the
-                             Python value of a HOC object that is not a ``PythonObject``
-    ``to_number``            ``(PyObject* value, double* x)``: 0 if it is not a number
-    ``operator``             ``(PyObject* held, const char* method, Object* other, int
+    ``to_number``            ``(Object* o, double* x)``: a HOC object as a number, for the
+                             GUI; 0 if it is not one. HOC is not put at its top level
+    ``operator``             ``(void* held, const char* method, Object* other, int
                              is_number, double x, ERR)``: HOC's operator on a Python object:
                              push the result of ``held.method(other or x)``; 2: HOC does it
     ``statement``            ``(const char* text, int* ok, ERR)``: ``nrnpython(text)``; it
                              fails only for SystemExit
-    ``callback_failed``      ``(int kind, PyObject* exception, ERR)``: a callback that NEURON
-                             calls itself failed: 0 ``hoccommand_exec`` (an
-                             ``FInitializeHandler``, ``NetCon.record``, ``CVode.event``), 1
-                             ``Vector.apply``'s call, 2 its result. 1: printed, the run goes on
-    ``call_string``          ``(PyObject* held, nrn_bytes* out, ERR)``: ``str(held())``. 2:
-                             the failure was printed
-    ``call_number``          ``(PyObject* held, int narg, int report, double* x, ERR)``: call
+    ``release``              ``void (void* held)``: a ``PythonObject`` goes, and with it the
+                             reference :c:func:`nrn_python_object_new` was given
+    ``hold``                 ``(void* held, void** result)``: a new reference to what a
+                             ``PythonObject`` holds, which NEURON gives back to ``release``
+                             (a :class:`PlotShape`'s variable). HOC is not put at its top
+                             level
+    ``command``              ``(void* held, ERR)``: call it, for an event
+                             (``FInitializeHandler``, ``NetCon.record``, ``CVode.event``):
+                             ``held()``, or ``held[0](*held[1])``. 2: it failed, and that
+                             was printed
+    ``apply``                ``(void* held, Object* vec, int start, int end, ERR)``:
+                             :meth:`Vector.apply`: each element from ``start`` to ``end``
+                             becomes ``held(element)``
+    ``call_string``          ``(void* held, nrn_bytes* out, ERR)``: ``str(held())``. 2: the
+                             failure was printed
+    ``call_number``          ``(void* held, int narg, int report, double* x, ERR)``: call
                              with ``narg`` arguments it pops. 2: it failed, and ``report`` was
                              0
-    ``praxis``               ``(PyObject* held, Object* vec, double* x, ERR)``: one evaluation
-                             of :func:`fit_praxis`. 3: ``float()`` of the result failed, a
-                             C++ exception "Python exception"
-    ``bind_arguments``       ``(PyObject* held, int narg, Object** result, ERR)``: a
+    ``praxis``               ``(void* held, Object* vec, double* x, ERR)``: one evaluation of
+                             :func:`fit_praxis`. 3: ``float()`` of the result failed, a C++
+                             exception "Python exception"
+    ``bind_arguments``       ``(void* held, int narg, Object** result, ERR)``: a
                              ``PythonObject`` of ``(held, arguments)``; pops them
-    ``call_with_section``    ``(PyObject* held, Section* sec, ERR)``: ``held(section)``
-    ``command_tool``         ``(PyObject* held, int type, double x, double y, int key, ERR)``
-    ``variable_get``         ``(PyObject* held, double* x, ERR)``: a GUI variable, a
+    ``call_with_section``    ``(void* held, Section* sec, ERR)``: ``held(section)``
+    ``command_tool``         ``(void* held, int type, double x, double y, int key, ERR)``
+    ``variable_get``         ``(void* held, double* x, ERR)``: a GUI variable, a
                              ``(target, key)`` tuple
-    ``variable_set``         ``(PyObject* held, double x, ERR)``
-    ``variable_string``      ``(PyObject* held, nrn_bytes* out, ERR)``
+    ``variable_set``         ``(void* held, double x, ERR)``
+    ``variable_string``      ``(void* held, nrn_bytes* out, ERR)``
     ``gui_call``             ``(const char* name, Object* obj, Object* self, int narg, int
                              pointers, int references, int want_string, Object** result,
                              nrn_bytes* string, ERR)``: a GUI function, method or constructor
@@ -2178,19 +2164,19 @@ there is no Python.
                              as a ``Pointer`` (bit i of ``pointers`` for argument i + 1). 2:
                              NEURON does it itself. A NULL ``name`` sets the interface's GUI
                              callback to what ``obj`` holds, or none
-    ``location``             ``(PyObject* held, int kind, Section** sec, double* x, ERR)``:
-                             kind 0 a section, 1 a segment, 2 a segment or an object with one
-    ``is_segment``           ``(PyObject* held)``: 1 or 0
+    ``location``             ``(void* held, int kind, Section** sec, double* x, ERR)``: kind
+                             0 a section, 1 a segment, 2 a segment or an object with one
+    ``is_segment``           ``(void* held)``: 1 or 0; ``held`` is not NULL
     ``segment_new``          ``(Section* sec, double x, Object** result, ERR)``
-    ``sections``             ``(PyObject* held, nrn_bytes* out, ERR)``: the ``Section*`` of an
+    ``sections``             ``(void* held, nrn_bytes* out, ERR)``: the ``Section*`` of an
                              iterable, also those before a failure
-    ``numbers``              ``(const char* name, PyObject* held, nrn_bytes* out, ERR)``: the
+    ``numbers``              ``(const char* name, void* held, nrn_bytes* out, ERR)``: the
                              doubles of :meth:`Vector.from_python`'s argument
-    ``vector_to_python``     ``(double* data, size_t size, const char* name, PyObject* held,
+    ``vector_to_python``     ``(double* data, size_t size, const char* name, void* held,
                              Object** result, ERR)``: into the sequence ``held``, or a new
                              list if it is NULL
     ``vector_as_numpy``      ``(double* data, size_t size, Object** result, ERR)``
-    ``pickle``               ``(PyObject* held, nrn_bytes* out, ERR)``. 3: a C++ exception
+    ``pickle``               ``(void* held, nrn_bytes* out, ERR)``. 3: a C++ exception
                              "Python exception"
     ``unpickle``             ``(const char* data, size_t size, Object** result, ERR)``. 3: as
                              ``pickle``
@@ -2208,11 +2194,27 @@ there is no Python.
                              whether through files; -1 on a failure, which is printed
     ``coreneuron_arg``       ``(double tstop, nrn_bytes* out)``: CoreNEURON's arguments; 0:
                              none
-    ``rvp_callable``         ``(PyObject* held, Object** result, ERR)``: what
+    ``rvp_callable``         ``(void* held, Object** result, ERR)``: what
                              :class:`RangeVarPlot` plots for it. 2: itself
-    ``wait_begin``,          ``void (void)``: the thread waits for the GUI's (Windows):
-    ``wait_end``             release the interface's HOC lock, and take it again
+    ``wait``                 ``void (void (*wait)(void*), void* arg)``: Windows: this thread
+                             waits for the GUI's, which calls Python and HOC: release the
+                             interface's HOC lock and the GIL, call ``wait(arg)``, and take
+                             them again. HOC is not put at its top level
+    ``section_name``         ``(void* owner, nrn_bytes* out)``: the name of a section the
+                             interface made (:c:func:`nrn_section_new_owned`), asked once,
+                             when it is made; 0: it has none, and is ``__nrnsec_<address>``
+    ``section_cell``         ``(void* owner, Object** result)``: its cell, or NULL
+    ``section_cell_equals``  ``(void* owner, Object* cell)``: 1 if it is its cell
+    ``launcher``             ``(const char* what, const char* arg)``: for ``nrniv -python``
+                             (``neuron/_launch.py``): ``run_file``, ``run_command`` (``-c``),
+                             ``prompt`` (NEURON's reader, also for ``input()``),
+                             ``interact``, ``set_path``, ``import_neuron``. 0: it failed, and
+                             that was printed as ``python`` prints it
     ======================== ==================================================================
+
+    The interface's first hook makes NEURON install its section owner hooks
+    (:c:func:`nrn_section_owner_hooks_set`), which call ``section_name``, ``section_cell`` and
+    ``section_cell_equals`` for the sections the interface made only: ``owner`` is never NULL.
 
     :param name: One of the above.
     :param hook: The function, or NULL to remove it.
@@ -2232,20 +2234,62 @@ there is no Python.
     call at all). An interface that turns an exception of its own into a HOC error keeps
     the exception, to raise it when the ``_nothrow`` call has returned, only if it is 1.
 
-.. c:function:: Object* nrn_python_object_new(PyObject* value)
+.. c:function:: Object* nrn_python_object_new(void* value)
 
-    Make a HOC ``PythonObject`` that holds a reference to ``value``.
+    Make a HOC ``PythonObject`` that holds ``value``. It takes over a reference the caller
+    has taken for it, which the ``release`` hook gives back when the object goes.
 
-    :returns: The object, with one reference owned by the caller.
+    :returns: The object, with one HOC reference owned by the caller.
 
-.. c:function:: PyObject* nrn_python_object_get(Object* obj)
+.. c:function:: int nrn_python_object_get(Object* obj, void** value)
 
-    What a ``PythonObject`` holds (the module ``__main__`` for HOC's ``new
-    PythonObject()``), or None for NULL. The interface makes the wrappers of other objects
-    itself.
+    What a ``PythonObject`` holds, borrowed: NULL for HOC's ``new PythonObject()``, which
+    stands for ``__main__``. The interface makes the wrappers of other objects itself.
 
-    :returns: A new reference, or NULL, with no exception set, for an object that is not a
-              ``PythonObject``.
+    :returns: 1, with ``*value`` set, if ``obj`` is a ``PythonObject``; 0 otherwise.
+
+.. c:function:: const char* nrn_hoc_readline(const char* prompt)
+
+    Read a line with HOC's reader, which handles the GUI's events while it waits; for
+    ``nrniv -python``'s prompt and ``input()`` (``PyOS_ReadlineFunctionPointer``).
+
+    :param prompt: The prompt, valid until the call returns.
+    :returns: The line, valid until the next call; ``""`` at the end of the input; NULL on
+              an error or an interrupt.
+
+The base types and the fast path
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Not in ``neuronapi.h``: these take and give Python objects, and are called with the GIL
+held (a ``ctypes.PYFUNCTYPE``). They and ``nrniv -python``'s start are the only code of
+NEURON that calls CPython (``src/nrniv/nrnpy_fast.cpp``, ``nrnpy_launch.cpp``).
+
+.. c:function:: PyObject* nrn_python_types(void)
+
+    The types ``(object, section, segment, mechanism, vector)``, borrowed. The interface's
+    wrappers of HOC objects derive from ``object``, of sections from ``section``: these hold
+    ``_obj`` (``Object*``, an int) and ``_sec`` (``Section*``, an int) and ``_pynative``, and
+    release what they stand for when an instance is freed, after a subclass's ``__del__``:
+    the reference to the object; the section if ``_pynative`` is True (one the interface
+    made with :c:func:`nrn_section_new_owned`), otherwise the reference to it. The others
+    are the fast path's, None when ``NRN_PYTHON_FAST_PATH=0``: the interface's Segment,
+    Mechanism and Vector derive from them, and add their own slots. NULL, with an error
+    set, if they could not be made.
+
+.. c:function:: int nrn_python_fast_setup(PyObject* objects, const Py_ssize_t* offsets)
+
+    Give the fast path, once the interface has made them, ``objects``, a tuple of its
+    Segment, Mechanism and Vector classes, its model epoch (a list of one, None once the
+    model may have changed), the dict section address -> nseg generation, its name tables
+    (range variable -> ``Symbol*``; mechanism -> range variable -> ``Symbol*``), ``0`` and
+    ``AttributeError``; and ``offsets``, where in an instance ``Segment._sec``, ``._x``,
+    ``._mech_cache``, ``Mechanism._seg``, ``._x``, ``._name``, ``._epoch`` and ``._nseg``
+    are. NEURON keeps the tuple. Exact instances of the classes then read and write a scalar
+    range variable at an interior ``x``, and a Vector element at an int index, in C; any
+    other access calls the class's ``_getattr``, ``_setattr``, ``_getitem`` or ``_setitem``.
+    NEURON ends the epoch (puts None) when the tree changes.
+
+    :returns: 0, or -1 with an error set.
 
 Shape Plot
 ----------

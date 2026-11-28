@@ -241,15 +241,21 @@ extern "C" int iv_bind_enqueue(void (*cb)(void*), void* w) {
 
 void nrn_gui_exec(void (*cb)(void*), void* v) {
     assert(GetCurrentThreadId() != bind_tid_);
-    // wait for the gui thread to handle the operation
-    auto* const gs = neuron::python::methods.save_thread();
     {
-        std::unique_lock<std::mutex> lock{mut_};
+        std::lock_guard<std::mutex> lock{mut_};
         w_ = v;
         nrn_gui_exec_ = cb;
-        cond_->wait(lock, [] { return !w_; });
     }
-    neuron::python::methods.restore_thread(gs);
+    // Wait for the gui thread to handle the operation. It may call Python: Python waits too.
+    auto const wait = [](void*) {
+        std::unique_lock<std::mutex> lock{mut_};
+        cond_->wait(lock, [] { return !w_; });
+    };
+    if (neuron::python::methods.without_gil) {
+        neuron::python::methods.without_gil(wait, nullptr);
+    } else {
+        wait(nullptr);
+    }
 }
 
 void nrniv_bind_call() {

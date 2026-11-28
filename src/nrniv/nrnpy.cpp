@@ -8,17 +8,26 @@
 #include "classreg.h"
 #include "nonvintblock.h"
 #include "nrnmpi.h"
+#include "hocstr.h"
 #include "nrnpy_launch.h"
 #include "nrnpy_hooks.h"
+#include "ocfile.h"
+#include "utils/logger.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <filesystem>
 #include <sstream>
 #include <string>
 #include <string_view>
-#if defined(NRNPYTHON_DYNAMICLOAD) && defined(_WIN32) && !defined(MINGW)
+#include <utility>
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+#if defined(NRNPYTHON_DYNAMICLOAD) && defined(_WIN32) && !defined(MINGW)
 #include "../oc/nrn_windows_home.hpp"
 #endif
 
@@ -421,13 +430,212 @@ void* neuron::python::nrnpy_open_libpython() {
 #endif
 #endif
 
+#if USE_PYTHON
+// nrniv -python, except what calls CPython (nrnpy_launch.cpp) or is Python (neuron/_launch.py).
+extern int nrn_istty_;
+extern char* hoc_xopen_file_;
+extern std::size_t hoc_xopen_file_size_;
+extern char* neuronhome_forward();
+#if DARWIN || defined(__linux__)
+extern const char* path_prefix_to_libnrniv();
+#endif
+
+std::string neuron::python::python_executable() {
+    std::string executable{nrnpy_pyexe};
+#ifndef NRNPYTHON_DYNAMICLOAD
+    // Python is linked. -pyexe changes what Python takes as its executable, not which Python it is.
+    if (executable.empty()) {
+        executable = neuron::config::default_python_executable;
+    }
+#endif
+    // Python finds pyvenv.cfg, and with it a virtual environment, from its executable. Left alone
+    // it would be nrniv or x86_64/special.
+    if (!std::filesystem::path{executable}.is_absolute()) {
+        throw std::runtime_error("Setting program name to a non-absolute path (" + executable +
+                                 ") is not portable; try passing an absolute path to -pyexe or "
+                                 "NRN_PYTHONEXE");
+    }
+    return executable;
+}
+
+// As python decides it.
+bool neuron::python::python_utf8_mode() {
+    auto const variable = [](const char* name) {
+        auto const* const value = std::getenv(name);
+        return std::string_view{value ? value : ""};
+    };
+    if (auto const option = variable("PYTHONUTF8"); !option.empty()) {
+        return option == "1";
+    }
+#if defined(WIN32)
+    return false;
+#else
+    for (auto const* name: {"LC_ALL", "LC_CTYPE", "LANG"}) {
+        if (auto const locale = variable(name); !locale.empty()) {
+            return locale == "C" || locale == "POSIX";
+        }
+    }
+    return true;
+#endif
+}
+
+std::string neuron::python::neuron_package_parent() {
+    std::string path{neuronhome_forward()};
+    if (path.empty()) {
+        return {};
+    }
+#if DARWIN || defined(__linux__)
+    path = path_prefix_to_libnrniv();
+#else
+    path += "/lib/";
+#endif
+    path += "python";
+    return isDirExist(path + "/neuron") ? path : std::string{};
+}
+
+bool neuron::python::fast_path_enabled() {
+    char const* const setting = std::getenv("NRN_PYTHON_FAST_PATH");
+    return !setting || std::strcmp(setting, "0") != 0;
+}
+
+void* neuron::python::python_symbol(void* library, const char* name) {
+#if defined(_WIN32)
+    if (library) {
+        return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(library), name));
+    }
+    // A process that runs Python has python3XY.dll. It exports the stable ABI, and what python3.dll
+    // leaves out.
+    for (int minor = 11; minor <= 30; ++minor) {
+        auto const dll = "python3" + std::to_string(minor) + ".dll";
+        if (auto const module = GetModuleHandleA(dll.c_str())) {
+            return reinterpret_cast<void*>(GetProcAddress(module, name));
+        }
+    }
+    return nullptr;
+#else
+    return dlsym(library ? library : RTLD_DEFAULT, name);
+#endif
+}
+
+namespace {
+/// NEURON starts Python on its first use, if Python is not the main program.
+bool launched{};
+
+bool launch_python() {
+    static bool failed{};
+    if (failed) {
+        return false;
+    }
+    try {
+        neuron::python::start_interpreter(neuron::python::nrnpy_open_libpython());
+        return launched = true;
+    } catch (std::exception const& e) {
+        Fprintf(stderr, "Could not start Python: %s\n", e.what());
+        failed = true;
+        return false;
+    }
+}
+
+/// load_file("rel.hoc") in a script looks next to the script.
+class CurrentFile {
+    std::string saved_{hoc_xopen_file_ ? hoc_xopen_file_ : ""};
+    static void set(const std::string& name) {
+        if (!hoc_xopen_file_ || name.size() >= hoc_xopen_file_size_) {
+            hoc_xopen_file_size_ = name.size() + 100;
+            hoc_xopen_file_ = static_cast<char*>(erealloc(hoc_xopen_file_, hoc_xopen_file_size_));
+        }
+        std::memcpy(hoc_xopen_file_, name.c_str(), name.size() + 1);
+    }
+
+  public:
+    explicit CurrentFile(std::string name) {
+#if defined(WIN32)
+        // fopen accepts /, and HOC takes \ in a string as an escape.
+        std::replace(name.begin(), name.end(), '\\', '/');
+#endif
+        set(name);
+    }
+    ~CurrentFile() {
+        set(saved_);
+    }
+};
+
+/// Returns 1 on success, 0 on failure.
+int run_file(const char* filename) {
+    if (auto* const file = std::fopen(filename, "r")) {
+        std::fclose(file);
+    } else {
+        Fprintf(stderr, "Could not open %s\n", filename);
+        return 0;
+    }
+    if (!neuron::python::start()) {
+        return 0;
+    }
+    CurrentFile const current{filename};
+    bool const ok = neuron::python::launcher_hook("run_file", filename);
+    std::fflush(stdout);
+    std::fflush(stderr);
+    return ok;
+}
+
+bool is_python_file(const char* arg) {
+    auto extension = std::filesystem::path{arg}.extension().string();
+#if defined(WIN32)
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+#endif
+    return extension == ".py";
+}
+
+/// nrniv -python: the -c "command" or the first script, then a prompt if there is a terminal.
+/// Returns whether there was an error.
+int run_command_line() {
+    if (!neuron::python::start()) {
+        Fprintf(stderr, "Python not available\n");
+        return 1;
+    }
+    neuron::python::launcher_hook("prompt", nullptr);  // NEURON's reader, also for input()
+    bool ok{true};
+    for (int i = 1; i < nrn_global_argc; ++i) {
+        if (std::strcmp(nrn_global_argv[i], "-c") == 0 && i + 1 < nrn_global_argc) {
+            ok = neuron::python::launcher_hook("run_command", nrn_global_argv[i + 1]);
+            break;
+        }
+        if (is_python_file(nrn_global_argv[i])) {
+            ok = run_file(nrn_global_argv[i]);
+            break;
+        }
+    }
+    if (nrn_istty_) {
+        ok = neuron::python::launcher_hook("interact", nullptr) && ok;
+    }
+    return !ok;
+}
+}  // namespace
+#endif
+
 void nrnpython_reg() {
 #if USE_PYTHON
     neuron::python::register_python_object();
     if (nrn_nopython) {
         return;
     }
-    neuron::python::register_launcher();
+    neuron::python::launch = launch_python;
+    // If NEURON started Python; otherwise it is the program's.
+    neuron::python::methods.interpreter_finalize = [] {
+        if (std::exchange(launched, false)) {
+            neuron::python::finalize();
+        }
+    };
+    neuron::python::methods.interpreter_run = run_command_line;
+    neuron::python::methods.interpreter_set_path = [] {
+        neuron::python::launcher_hook("set_path", "");
+    };
+    neuron::python::import_interface = [] {
+        return neuron::python::launcher_hook("import_neuron", nullptr);
+    };
+    p_nrnpy_pyrun = run_file;
 #if NRNMPI && defined(NRNPYTHON_DYNAMICLOAD)
     if (nrnmpi_numprocs_world > 1) {
         // Only some ranks may ever use Python, and rank 0 tells them which.

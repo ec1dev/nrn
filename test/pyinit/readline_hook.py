@@ -4,7 +4,8 @@ CPython calls that pointer only when stdin and stdout are both ttys
 (PyOS_Readline). A pipe, including the interactive-console EOF test, does
 not. The pointer is not part of the stable ABI: python3.dll does not export
 it, and a versioned Windows build may not load python3.dll at all. Read the
-global back and require the function to live in nrniv or nrnpython.
+global back and require that it is not Python's own reader: the reader is a
+ctypes callback of neuron/_launch.py, which no library holds.
 
 The pointer check closes stdin. On Unix this script then types the next
 statement only after the next prompt. Writing every line at once left
@@ -35,7 +36,7 @@ def module_path(addr):
         kernel32.GetModuleHandleExW.restype = ctypes.c_int
         ok = kernel32.GetModuleHandleExW(0x4 | 0x2, ctypes.c_void_p(addr), ctypes.byref(handle))
         if not ok:
-            raise SystemExit("GetModuleHandleExW failed")
+            return ""  # not in a module
         buf = ctypes.create_unicode_buffer(32768)
         kernel32.GetModuleFileNameW.argtypes = [
             ctypes.c_void_p,
@@ -59,7 +60,7 @@ def module_path(addr):
     libdl.dladdr.restype = ctypes.c_int
     info = Dl_info()
     if not libdl.dladdr(ctypes.c_void_p(addr), ctypes.byref(info)) or not info.dli_fname:
-        raise SystemExit("dladdr failed for the readline hook")
+        return ""  # not in a library
     return info.dli_fname.decode()
 
 
@@ -104,8 +105,9 @@ def hook_address():
 
 path = module_path(hook_address())
 base = os.path.basename(path).lower()
-if "nrniv" not in base and "nrnpython" not in base:
-    raise SystemExit("readline hook is in %s, not nrniv or nrnpython" % path)
+# Python's own readers are in libpython (or the python executable) and the readline module.
+if "python" in base or "readline" in base:
+    raise SystemExit("the readline hook is Python's own, in %s" % path)
 print("readline-hook-ok")
 """
 
@@ -206,7 +208,7 @@ def _check_interactive(nrniv):
         "fp=ctypes.cast(b, ctypes.POINTER(ctypes.c_void_p))[0]",
         "raw=ctypes.cast(fp, ctypes.c_char_p).value if ok else None",
         "p=raw.decode().lower() if raw else ''",
-        "hit=('nrniv' in p) or ('nrnpython' in p)",
+        "hit=not ('python' in p.rsplit('/', 1)[-1] or 'readline' in p.rsplit('/', 1)[-1])",
         "print('readline-hook-' + ('ok' if hit else 'bad'))",
         "print(101*4193)",
         "exit()",

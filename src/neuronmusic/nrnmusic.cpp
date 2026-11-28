@@ -1,5 +1,4 @@
 #include <../../nrnconf.h>
-#define NO_PYTHON_H 1
 #define IN_NRNMUSIC_CPP
 #include "nrnmusicapi.h"
 #include "hocdec.h"
@@ -9,7 +8,6 @@
 #include "netcvode.h"
 #include "multicore.h"
 #include "nrnmusic.h"
-#include "nrnpy.h"
 #include "netpar.h"
 #include <unordered_map>
 
@@ -165,10 +163,9 @@ NRNMUSIC::EventInputPort* NRNMUSIC::publishEventInput(std::string id) {
     return new NRNMUSIC::EventInputPort(nrnmusic_setup, id);
 }
 
-PyObject* NRNMUSIC::EventInputPort::index2target(int gi, PyObject* ptarget) {
+void* NRNMUSIC::EventInputPort::index2target(int gi, void* ptarget) {
     // analogous to pc.gid_connect
-    assert(neuron::python::methods.po2ho);
-    Object* target = neuron::python::methods.po2ho(ptarget);
+    Object* target = static_cast<Object*>(ptarget);
     if (!is_point_process(target)) {
         hoc_execerror("target arg must be a Point_process", 0);
     }
@@ -191,10 +188,8 @@ PyObject* NRNMUSIC::EventInputPort::index2target(int gi, PyObject* ptarget) {
     NetCon* nc = new NetCon(ps, target);
     Object* o = hoc_new_object(nrn_netcon_sym(), nc);
     nc->obj_ = o;
-    assert(neuron::python::methods.ho2po);
-    PyObject* po = neuron::python::methods.ho2po(o);
-    // printf("index2target %d %s\n", gi, hoc_object_name(target));
-    return po;
+    hoc_obj_ref(o);
+    return o;
 }
 
 void nrnmusic_init(int* pargc, char*** pargv) {

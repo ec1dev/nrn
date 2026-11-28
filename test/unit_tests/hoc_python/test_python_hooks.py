@@ -19,11 +19,16 @@ data = lib.nrn_vector_data
 data.argtypes, data.restype = [ctypes.c_void_p], ctypes.POINTER(ctypes.c_double)
 push = lib.nrn_object_push
 push.argtypes = [ctypes.c_void_p]
-new_python_object = lib.nrn_python_object_new
-new_python_object.argtypes, new_python_object.restype = [ctypes.py_object], ctypes.c_void_p
+new_python_object = (
+    api._new_python_object
+)  # nrn_python_object_new, with a reference to give
 ERR = (ctypes.c_void_p, ctypes.c_size_t)  # c_char_p would copy the buffer
 PRAXIS = ctypes.CFUNCTYPE(
-    ctypes.c_int, ctypes.py_object, ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), *ERR
+    ctypes.c_int,
+    ctypes.py_object,
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_double),
+    *ERR,
 )
 
 
@@ -33,17 +38,24 @@ def replace():
 
     def set_hook(name, callback):
         replaced.append(name)
-        assert hook_set(name.encode(), ctypes.cast(callback, ctypes.c_void_p), None, 0) == 0
+        assert (
+            hook_set(name.encode(), ctypes.cast(callback, ctypes.c_void_p), None, 0)
+            == 0
+        )
 
     yield set_hook
     for name in replaced:
-        hook_set(name.encode(), ctypes.cast(_provider._HOOKS[name], ctypes.c_void_p), None, 0)
+        hook_set(
+            name.encode(), ctypes.cast(_provider._HOOKS[name], ctypes.c_void_p), None, 0
+        )
 
 
 def test_names():
     error = ctypes.create_string_buffer(64)
     assert hook_set(b"praxis", None, error, len(error)) == 0
-    hook_set(b"praxis", ctypes.cast(_provider._HOOKS["praxis"], ctypes.c_void_p), None, 0)
+    hook_set(
+        b"praxis", ctypes.cast(_provider._HOOKS["praxis"], ctypes.c_void_p), None, 0
+    )
     assert hook_set(b"nosuch", None, error, len(error)) == 1
     assert error.value == b"nosuch is not a Python hook"
 

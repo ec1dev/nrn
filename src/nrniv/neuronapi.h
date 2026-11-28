@@ -22,7 +22,6 @@ typedef struct nrn_Item nrn_Item;
 typedef struct SymbolTableIterator SymbolTableIterator;
 typedef struct Symlist Symlist;
 typedef struct ShapePlotInterface ShapePlotInterface;
-typedef struct _object PyObject;
 
 /* Non-owning hooks for provider-backed object components. On success, a read
  * callback consumes the component's deferred object frame, pushes one HOC
@@ -71,6 +70,10 @@ NRN_DLLSYM bool nrn_section_owner_hooks_set(nrn_section_owner_name_func name,
                                             size_t error_msg_size);
 NRN_DLLSYM bool nrn_section_owner_hooks_clear(char* error_msg, size_t error_msg_size);
 NRN_DLLSYM Section* nrn_section_new_owned(void* owner);
+NRN_DLLSYM int nrn_section_new_owned_nothrow(void* owner,
+                                             Section** result,
+                                             char* error_msg,
+                                             size_t error_msg_size);
 NRN_DLLSYM void* nrn_section_owner_get(Section* sec);
 NRN_DLLSYM void nrn_section_owned_release(Section* sec);
 NRN_DLLSYM void nrn_section_connect(Section* child_sec,
@@ -229,9 +232,8 @@ NRN_DLLSYM int nrn_python_hook_set(const char* name,
                                    char* error_msg,
                                    size_t error_msg_size);
 NRN_DLLSYM void nrn_bytes_set(nrn_bytes* out, const char* data, size_t size);
-NRN_DLLSYM Object* nrn_python_object_new(PyObject* value);
-NRN_DLLSYM PyObject* nrn_python_object_get(Object* obj);
-NRN_DLLSYM PyObject* nrn_python_type(const char* name);
+NRN_DLLSYM Object* nrn_python_object_new(void* value);
+NRN_DLLSYM int nrn_python_object_get(Object* obj, void** value);
 
 /****************************************
  * Shape Plot
@@ -248,6 +250,7 @@ NRN_DLLSYM float nrn_get_plotshape_high(ShapePlotInterface* spi);
 NRN_DLLSYM int nrn_hoc_call(char const* command);
 NRN_DLLSYM int nrn_hoc_call_nothrow(char const* command);
 NRN_DLLSYM int nrn_hoc_error_is_returned(void);
+NRN_DLLSYM const char* nrn_hoc_readline(const char* prompt);
 NRN_DLLSYM void nrn_str_assign(char** target, const char* value);
 NRN_DLLSYM int nrn_structure_change_count(void);
 NRN_DLLSYM int nrn_mechanism_type_count(void);

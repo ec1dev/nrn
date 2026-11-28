@@ -9,7 +9,7 @@ cdef extern from "nrnmusic.h":
     void del_EventOutputPort "delete" (cxx_EventOutputPort* obj)
 
     ctypedef struct cxx_EventInputPort "NRNMUSIC::EventInputPort":
-       object index2target (int gi, object target)
+       void* index2target (int gi, void* target)
 
     cxx_EventInputPort* new_EventInputPort "new NRNMUSIC::EventInputPort" (cxx_Setup* s, char* id)
     void del_EventInputPort "delete" (cxx_EventInputPort* obj)

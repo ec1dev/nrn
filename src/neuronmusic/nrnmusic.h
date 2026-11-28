@@ -1,13 +1,5 @@
 #include <string>
 
-#if defined(NO_PYTHON_H)
-typedef struct _object PyObject;
-#else
-#undef HAVE_PROTOTYPES
-#define PY_SSIZE_T_CLEAN
-#include <Python.h>
-#undef snprintf
-#endif
 #include <music.hh>
 
 #include <unordered_map>
@@ -35,8 +27,9 @@ class EventInputPort: public MUSIC::EventInputPort {
   public:
     EventInputPort(MUSIC::Setup* s, std::string id);
 
-    // Connect a MUSIC global index to a gid in this port
-    PyObject* index2target(int gi, PyObject* target);
+    // Connect a MUSIC global index to a point process: the new NetCon, with a reference for the
+    // caller (neuronmusic.pyx gives both as the interface's Object addresses).
+    void* index2target(int gi, void* target);
 
     Gi2PreSynTable* gi_table;
 };
