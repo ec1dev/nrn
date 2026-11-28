@@ -141,7 +141,7 @@ constexpr int tp_clear = 51, tp_dealloc = 52, tp_init = 60, tp_new = 65, tp_trav
               tp_members = 72;
 // The fast path (nrnpy_fast.cpp): Py_tp_*, Py_mp_*, METH_*
 constexpr int tp_getattro = 58, tp_setattro = 69, tp_iter = 62, tp_iternext = 63, tp_methods = 64,
-              mp_subscript = 5, mp_ass_subscript = 3, sq_item = 44;
+              mp_subscript = 5, mp_ass_subscript = 3, mp_length = 4, sq_item = 44, sq_length = 45;
 constexpr int meth_noargs = 0x0004;
 constexpr int t_object_ex = 16;  // Py_T_OBJECT_EX
 // Py_TPFLAGS_*

@@ -47,7 +47,7 @@ struct Tables {
     // The interface's own classes: only exact instances take the fast path, so a subclass always
     // has the Python methods' behaviour (its class attributes first, then _getattr).
     PyObject *segment_class{}, *mechanism_class{}, *vector_class{};
-    PyObject *s_getattr{}, *s_setattr{}, *s_getitem{}, *s_setitem{}, *zero{};
+    PyObject *s_getattr{}, *s_setattr{}, *s_getitem{}, *s_setitem{}, *s_len{}, *zero{};
 } t;
 
 /// Forget every name when KSChan renamed or freed a symbol since the last look.
@@ -350,20 +350,24 @@ PyObject* section_segments(PyObject* self, PyObject*) {
 
 cTemplate* vector_template{};
 
+/// The Vector of an exact instance of the interface's Vector, or null.
+Object* vector_object(PyObject* self) {
+    Object* const o = exact(self, t.vector_class, "_fast_vector_class") ? hoc_object(self)
+                                                                        : nullptr;
+    if (o && !vector_template && !std::strcmp(o->ctemplate->sym->name, "Vector")) {
+        vector_template = o->ctemplate;  // once: only the interface's Vector has this base
+    }
+    return o && o->ctemplate == vector_template ? o : nullptr;
+}
+
 /// The element of a Vector for an exact int key in range, or null.
 double* element(PyObject* self, PyObject* key) {
-    Object* const o = type_of(key) == py.PyLong_Type &&
-                              exact(self, t.vector_class, "_fast_vector_class")
-                          ? hoc_object(self)
-                          : nullptr;
+    Object* const o = type_of(key) == py.PyLong_Type ? vector_object(self) : nullptr;
     if (!o) {
         return nullptr;
     }
-    if (!vector_template && !std::strcmp(o->ctemplate->sym->name, "Vector")) {
-        vector_template = o->ctemplate;  // once: only the interface's Vector has this base
-    }
     std::ptrdiff_t i = py.PyLong_AsSsize_t(key);
-    if (o->ctemplate != vector_template || (i == -1 && py.PyErr_Occurred())) {
+    if (i == -1 && py.PyErr_Occurred()) {
         py.PyErr_Clear();
         return nullptr;
     }
@@ -404,6 +408,15 @@ int vector_setitem(PyObject* self, PyObject* key, PyObject* value) {
 PyObject* vector_item(PyObject* self, std::ptrdiff_t i) {
     Ref const key{py.PyLong_FromLongLong(i)};
     return key ? vector_getitem(self, key.get()) : nullptr;
+}
+
+// len(vec); anything unusual is the interface's _len.
+std::ptrdiff_t vector_length(PyObject* self) {
+    if (Object* const o = vector_object(self)) {
+        return nrn_vector_capacity(o);
+    }
+    Ref const n{py.PyObject_CallMethodObjArgs(self, t.s_len, nullptr)};
+    return n ? py.PyLong_AsSsize_t(n.get()) : -1;
 }
 
 PyObject* table(const char* name) {
@@ -521,6 +534,7 @@ bool make_types() {
     t.s_setattr = py.PyUnicode_InternFromString("_setattr");
     t.s_getitem = py.PyUnicode_InternFromString("_getitem");
     t.s_setitem = py.PyUnicode_InternFromString("_setitem");
+    t.s_len = py.PyUnicode_InternFromString("_len");
     t.zero = py.PyLong_FromLongLong(0);
     t.rangevars = table("_fast_rangevars");
     t.mechanisms = table("_fast_mechanisms");
@@ -545,13 +559,15 @@ bool make_types() {
     static Slot vector_slots[]{{stable::mp_subscript, reinterpret_cast<void*>(vector_getitem)},
                                {stable::mp_ass_subscript, reinterpret_cast<void*>(vector_setitem)},
                                {stable::sq_item, reinterpret_cast<void*>(vector_item)},
+                               {stable::mp_length, reinterpret_cast<void*>(vector_length)},
+                               {stable::sq_length, reinterpret_cast<void*>(vector_length)},
                                {0, nullptr}};
     // The collector's flag and functions are inherited from the base.
     static stable::Spec vector_spec{
         "hoc._Vector", 0, 0, static_cast<unsigned>(stable::tpflags_basetype), vector_slots};
     types.vector = py.PyType_FromSpecWithBases(&vector_spec, types.object);
-    return t.s_getattr && t.s_setattr && t.s_getitem && t.s_setitem && t.zero && t.rangevars &&
-           t.mechanisms && iterator_type && types.vector;
+    return t.s_getattr && t.s_setattr && t.s_getitem && t.s_setitem && t.s_len && t.zero &&
+           t.rangevars && t.mechanisms && iterator_type && types.vector;
 }
 
 }  // namespace neuron::python::fast
