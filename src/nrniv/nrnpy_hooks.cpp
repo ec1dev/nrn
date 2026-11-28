@@ -22,7 +22,6 @@
 #include "hocstr.h"
 #include "ivocvect.h"
 #include "neuronapi.h"
-#include "nrnmpi.h"
 #include "nrnoc2iv.h"
 #include "nrnpy_capi.h"
 #include "nrnpy_hooks.h"
@@ -56,7 +55,7 @@ namespace {
     X(gui_call) X(location) X(is_segment) X(segment_new) X(sections) X(numbers)               \
     X(vector_to_python) X(vector_as_numpy) X(pickle) X(unpickle) X(call_pickled)              \
     X(savestate_store) X(savestate_restore) X(coreneuron_option) X(coreneuron_arg)            \
-    X(rvp_callable) X(wait_begin) X(wait_end)
+    X(rvp_callable) X(wait_begin) X(wait_end) X(collective)
 // clang-format on
 enum class Hook {
 #define X(name) name,
@@ -131,6 +130,7 @@ using CoreneuronOption = int (*)(int, int*);
 using CoreneuronArg = int (*)(double, nrn_bytes*);
 using RvpCallable = int (*)(PyObject*, Object**, Err, std::size_t);
 using Wait = void (*)();
+using Collective = int (*)(int, int, int, Object**, Err, std::size_t);
 
 /// Is the hook registered? Does not start Python.
 bool has(Hook hook) {
@@ -409,22 +409,25 @@ int gui_get_str(Object* o, char** cpp) {
 
 /// Push the arguments of the HOC call in progress; a pointer as a Pointer to it (a bit set in
 /// pointers).
+void push_argument(int i, int bit, int& pointers) {
+    if (hoc_is_object_arg(i)) {
+        hoc_push_object(*hoc_objgetarg(i));
+    } else if (hoc_is_pdouble_arg(i)) {
+        static Symbol* const pointer = hoc_table_lookup("Pointer", hoc_built_in_symlist);
+        Object* const o = hoc_new_object(pointer, new OcPointer("", hoc_hgetarg<double>(i)));
+        hoc_push_object(o);
+        pointers |= bit < 31 ? 1 << bit : 0;
+    } else if (hoc_is_str_arg(i)) {
+        hoc_pushstr(hoc_pgargstr(i));
+    } else {
+        hoc_pushx(*getarg(i));
+    }
+}
+
 int push_arguments(int& pointers) {
     int n{};
     for (; ifarg(n + 1); ++n) {
-        int const i = n + 1;
-        if (hoc_is_object_arg(i)) {
-            hoc_push_object(*hoc_objgetarg(i));
-        } else if (hoc_is_pdouble_arg(i)) {
-            static Symbol* const pointer = hoc_table_lookup("Pointer", hoc_built_in_symlist);
-            Object* const o = hoc_new_object(pointer, new OcPointer("", hoc_hgetarg<double>(i)));
-            hoc_push_object(o);
-            pointers |= n < 31 ? 1 << n : 0;
-        } else if (hoc_is_str_arg(i)) {
-            hoc_pushstr(hoc_pgargstr(i));
-        } else {
-            hoc_pushx(*getarg(i));
-        }
+        push_argument(n + 1, n, pointers);
     }
     return n;
 }
@@ -606,225 +609,21 @@ std::vector<char> call_picklef(const std::vector<char>& pickled, int narg) {
     return std::move(out.data);
 }
 
-#if NRNMPI
-/// pickle.dumps or pickle.loads. Not released: Python may already be gone at exit.
-PyObject* pickle_function(const char* name) {
-    Ref const pickle{py.PyImport_ImportModule("pickle")};
-    Ref function{pickle ? py.PyObject_GetAttrString(pickle.get(), name) : nullptr};
-    if (!function) {
-        hoc_error_from_python("Python's pickle is not available");
-    }
-    return function.release();
-}
-
-std::vector<char> dumps(PyObject* p) {
-    static PyObject* function;
-    if (!function) {
-        function = pickle_function("dumps");
-    }
-    Ref const bytes = call(function, Ref::borrow(p));
-    char* data{};
-    std::ptrdiff_t size{};
-    if (!bytes || py.PyBytes_AsStringAndSize(bytes.get(), &data, &size)) {
-        hoc_error_from_python("Python exception");
-    }
-    return {data, data + size};
-}
-
-Ref loads(const char* data, std::size_t size) {
-    static PyObject* function;
-    if (!function) {
-        function = pickle_function("loads");
-    }
-    Ref const bytes{py.PyBytes_FromStringAndSize(data, size)};
-    Ref value = call(function, bytes);
-    if (!value) {
-        hoc_error_from_python("Python exception");
-    }
-    return value;
-}
-
-std::vector<int> displacements(const std::vector<int>& counts) {
-    std::vector<int> d(counts.size() + 1);
-    for (std::size_t i = 0; i < counts.size(); ++i) {
-        d[i + 1] = d[i] + counts[i];
-    }
-    return d;
-}
-
-/// A list of the pickled values in data. A rank that sent nothing sent None.
-Ref unpickle_list(const std::vector<char>& data,
-                  const std::vector<int>& counts,
-                  const std::vector<int>& displs) {
-    Ref list{py.PyList_New(0)};
-    for (std::size_t i = 0; i < counts.size(); ++i) {
-        Ref const item = counts[i] ? loads(data.data() + displs[i], counts[i])
-                                   : Ref::borrow(py._Py_NoneStruct);
-        py.PyList_Append(list.get(), item.get());
-    }
-    return list;
-}
-
-Ref allgather(PyObject* source) {
-    auto send = dumps(source);
-    std::vector<int> counts(nrnmpi_numprocs);
-    counts[nrnmpi_myid] = static_cast<int>(send.size());
-    nrnmpi_int_allgather_inplace(counts.data(), 1);
-    auto displs = displacements(counts);
-    std::vector<char> data(displs.back());
-    nrnmpi_char_allgatherv(send.data(), data.data(), counts.data(), displs.data());
-    return unpickle_list(data, counts, displs);
-}
-
-Ref gather(PyObject* source, int root) {
-    auto send = dumps(source);
-    bool const is_root = nrnmpi_myid == root;
-    int size = static_cast<int>(send.size());
-    std::vector<int> counts(is_root ? nrnmpi_numprocs : 0);
-    nrnmpi_int_gather(&size, counts.data(), 1, root);
-    auto displs = displacements(counts);
-    std::vector<char> data(displs.back());
-    nrnmpi_char_gatherv(send.data(), size, data.data(), counts.data(), displs.data(), root);
-    return is_root ? unpickle_list(data, counts, displs) : Ref::borrow(py._Py_NoneStruct);
-}
-
-Ref broadcast(PyObject* source, int root) {
-    bool const is_root = nrnmpi_myid == root;
-    auto data = is_root ? dumps(source) : std::vector<char>{};
-    int size = static_cast<int>(data.size());
-    nrnmpi_int_broadcast(&size, 1, root);
-    data.resize(size);
-    nrnmpi_char_broadcast(data.data(), size, root);
-    return is_root ? Ref::borrow(source) : loads(data.data(), data.size());
-}
-
-/// The pickled items of a list, one per rank, None as nothing.
-std::vector<char> pickle_items(PyObject* list, std::vector<int>& counts, bool keep) {
-    std::vector<char> data;
-    for (int i = 0; i < nrnmpi_numprocs; ++i) {
-        auto* const item = py.PyList_GetItem(list, i);
-        auto const pickled = item == py._Py_NoneStruct ? std::vector<char>{} : dumps(item);
-        counts.push_back(static_cast<int>(pickled.size()));
-        if (keep) {
-            data.insert(data.end(), pickled.begin(), pickled.end());
-        }
-    }
-    return data;
-}
-
-Ref scatter(PyObject* source, int root) {
-    std::vector<int> counts;
-    auto send = nrnmpi_myid == root ? pickle_items(source, counts, true) : std::vector<char>{};
-    auto displs = displacements(counts);
-    int size{};
-    nrnmpi_int_scatter(counts.data(), &size, 1, root);
-    std::vector<char> data(size + 1);  // not empty
-    nrnmpi_char_scatterv(send.data(), counts.data(), displs.data(), data.data(), size, root);
-    return size ? loads(data.data(), size) : Ref::borrow(py._Py_NoneStruct);
-}
-
-// A negative size asks only for the numbers of bytes to be sent and received.
-Ref alltoall(PyObject* source, int size) {
-    std::vector<int> send_counts;
-    auto send = pickle_items(source, send_counts, size >= 0);
-    std::vector<int> ones(nrnmpi_numprocs, 1);
-    auto unit = displacements(ones);
-    std::vector<int> counts(nrnmpi_numprocs);
-    nrnmpi_int_alltoallv(
-        send_counts.data(), ones.data(), unit.data(), counts.data(), ones.data(), unit.data());
-    auto send_displs = displacements(send_counts);
-    auto displs = displacements(counts);
-    if (size < 0) {
-        Ref tuple{py.PyTuple_New(2)};
-        py.PyTuple_SetItem(tuple.get(), 0, py.PyLong_FromLongLong(send_displs.back()));
-        py.PyTuple_SetItem(tuple.get(), 1, py.PyLong_FromLongLong(displs.back()));
-        return tuple;
-    }
-    std::vector<char> data(displs.back() + 1);  // not empty
-    nrnmpi_char_alltoallv(send.data(),
-                          send_counts.data(),
-                          send_displs.data(),
-                          data.data(),
-                          counts.data(),
-                          displs.data());
-    return unpickle_list(data, counts, displs);
-}
-#endif
-
-/// The first argument of the HOC call in progress.
-Ref first_argument() {
-    if (hoc_is_object_arg(1)) {
-        return to_python(*hoc_objgetarg(1));
-    }
-    if (hoc_is_str_arg(1)) {
-        return Ref{py.PyUnicode_FromString(gargstr(1))};
-    }
-    return Ref{py.PyFloat_FromDouble(*getarg(1))};
-}
-
 /// type is 1 alltoall, 2 allgather, 3 gather, 4 broadcast, 5 scatter. For 3, 4 and 5 size is the
-/// root rank.
+/// root rank. The interface pickles and sends with HOC's pc.alltoall.
 Object* collective(int size, int type) {
-    require();
-    Top const top{};
-    enum { ALLTOALL = 1, ALLGATHER, GATHER, BROADCAST, SCATTER };
-    int const nhost = nrnmpi_numprocs;
-    if (type == ALLTOALL || type == SCATTER) {
+    if (type == 1 || type == 5) {
         hoc_objgetarg(1);  // a HOC error if it is not an object, as NEURON's
     }
-    Ref const source = first_argument();
-    if (type == ALLTOALL || (type == SCATTER && nrnmpi_myid == size)) {
-        if (!is_instance(source.get(), py.PyList_Type)) {
-            hoc_execerror("Argument must be a Python list", nullptr);
-        }
-        if (py.PyList_Size(source.get()) != nhost) {
-            hoc_execerror(type == ALLTOALL ? "py_alltoall list size must be nhost"
-                                           : "py_scatter list size must be nhost",
-                          nullptr);
-        }
+    Call call{Hook::collective};
+    int pointer{};
+    push_argument(1, 0, pointer);
+    Object* result{};
+    if (call.check(
+            call.get<Collective>()(type, size, pointer, &result, call.err, sizeof call.err)) == 3) {
+        throw std::runtime_error("Python exception");
     }
-    if (nhost == 1) {
-        switch (type) {
-        case SCATTER:
-            return temp(to_hoc(py.PyList_GetItem(source.get(), 0)));
-        case ALLGATHER:
-        case GATHER: {
-            Ref const list{py.PyList_New(0)};
-            py.PyList_Append(list.get(), source.get());
-            return temp(to_hoc(list.get()));
-        }
-        default:
-            return temp(to_hoc(source.get()));
-        }
-    }
-#if NRNMPI
-    if (type != ALLTOALL && type != ALLGATHER && (size < 0 || size >= nhost)) {
-        hoc_execerror("root rank must be >= 0 and < nhost", nullptr);
-    }
-    Ref result;
-    switch (type) {
-    case ALLTOALL:
-        result = alltoall(source.get(), size);
-        break;
-    case ALLGATHER:
-        result = allgather(source.get());
-        break;
-    case GATHER:
-        result = gather(source.get(), size);
-        break;
-    case BROADCAST:
-        result = broadcast(source.get(), size);
-        break;
-    default:
-        result = scatter(source.get(), size);
-    }
-    Object* const o = to_hoc(result.get());
-    result = Ref{};  // before the reference is given up: it may hold the object's
-                     // last other one
-    return temp(o);
-#else
-    return nullptr;
-#endif
+    return temp(result);
 }
 
 // ---- other hooks

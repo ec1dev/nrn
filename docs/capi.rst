@@ -2165,6 +2165,11 @@ there is no Python.
     ``call_pickled``         ``(const char* data, size_t size, int narg, nrn_bytes* out,
                              ERR)``: the pickled result of the pickled callable, with ``narg``
                              arguments it pops. 3: as ``pickle``; 4: ``std::bad_cast``
+    ``collective``           ``(int type, int size, int pointer, Object** result, ERR)``:
+                             :meth:`ParallelContext.py_alltoall` (1), ``py_allgather`` (2),
+                             ``py_gather`` (3), ``py_broadcast`` (4), ``py_scatter`` (5) of the
+                             argument on the HOC stack (a ``Pointer`` if ``pointer``); ``size``
+                             is the root rank of 3-5. 3: as ``pickle``
     ``savestate_store``      ``(nrn_bytes* out, ERR)``: what :class:`SaveState` keeps. 2: none
     ``savestate_restore``    ``(const char* data, size_t size, ERR)``. 2: nothing to restore it
     ``coreneuron_option``    ``(int which, int* value)``: 0 whether to run CoreNEURON, 1
