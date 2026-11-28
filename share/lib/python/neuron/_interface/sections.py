@@ -1789,6 +1789,10 @@ if _FAST_RANGEVARS is not None:  # only exact instances take the core's fast pat
     SEGMENT_BASE._fast_segment_class = Segment
 
 
+# A core whose base Section type iterates over the segments (nrnpy_fast.cpp).
+_CORE_SEGMENTS = hasattr(SECTION_BASE, "_segments")
+
+
 class _SectionSegments:
     """for seg in sec, as NEURON's iterator: nseg is read again at each step,
     so rediscretizing changes the remaining midpoints and the stopping point,
@@ -2095,7 +2099,7 @@ class Section(SECTION_BASE):
 
     def __iter__(self):
         self._check_alive()  # now, as NEURON does, not on the first next()
-        if _FAST_RANGEVARS is not None:
+        if _CORE_SEGMENTS:
             return self._segments()  # the core's iterator, the same loop
         return _SectionSegments(self)
 
@@ -2295,12 +2299,14 @@ class Section(SECTION_BASE):
             cell = _PACKAGE._n.section_owner(sec=self)
         return cell
 
-    def _get_L(self):
+    @property
+    def L(self):
         self._check_alive()
 
         return _nrn_section_length_get(self._sec)
 
-    def _set_L(self, value):
+    @L.setter
+    def L(self, value):
         value = _to_double(value, ValueError)
         self._check_alive()
 
@@ -2309,16 +2315,6 @@ class Section(SECTION_BASE):
         if not _is_finite(value) or value <= 0:
             raise ValueError("L must be > 0.")
         _nrn_section_length_set(self._sec, value)
-
-    def _del_L(self):
-        raise AttributeError(
-            f"property 'L' of {type(self).__name__!r} object has no deleter"
-        )
-
-    # The core's getter (nrnpy_fast.cpp) calls the methods above for anything
-    # but the length of a section that exists, and for every write.
-    if not hasattr(SECTION_BASE, "L"):
-        L = property(_get_L, _set_L)
 
     @property
     def Ra(self):

@@ -150,6 +150,10 @@ if CALLS_PYTHON:
 else:
     from . import _released_core as _python_hooks
 _python_hooks.install()
+if CALLS_PYTHON:  # the classes and tables of the core's fast path all exist now
+    from ._bases import fast_setup as _fast_setup
+
+    _fast_setup()
 # neuron.rxd's
 set_savestate_callbacks = _python_hooks.set_savestate_callbacks
 set_rvp_converter = _python_hooks.set_rvp_converter

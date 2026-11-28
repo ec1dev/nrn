@@ -355,12 +355,8 @@ class Mechanism(*_MECHANISM_BASES):
     """
 
     __module__ = NRN_CLASS_MODULE
-    # The core's base has these slots and the fast path (nrnpy_fast.cpp).
-    __slots__ = (
-        ()
-        if MECHANISM_BASE is not None
-        else ("_seg", "_x", "_name", "_is_ion", "_epoch", "_nseg", "_x_nseg")
-    )
+    # The core's fast path (nrnpy_fast.cpp) reads them where _bases.fast_setup says.
+    __slots__ = ("_seg", "_x", "_name", "_is_ion", "_epoch", "_nseg", "_x_nseg")
 
     # As NEURON's nrn.Mechanism: no pickle, copy or deepcopy (the default
     # copied the slots; copy.copy(seg.hh) did not return).

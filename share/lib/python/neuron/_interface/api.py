@@ -442,22 +442,44 @@ def _bump_model_epoch():
 
 
 if CALLS_PYTHON:
-    # A PythonObject with one reference, the caller's.
-    _new_python_object = _bind(
-        "nrn_python_object_new", ctypes.c_void_p, ctypes.py_object
+    _python_object_new = _bind(
+        "nrn_python_object_new", ctypes.c_void_p, ctypes.c_void_p
     )
-    # What a PythonObject holds (the wrappers of other objects are this module's).
-    _python_object_get = _bind(
-        "nrn_python_object_get", ctypes.py_object, ctypes.c_void_p
+    # Writes the PyObject* into a py_object, which does not own it; reading its
+    # value takes a reference.
+    _python_object_payload = _bind(
+        "nrn_python_object_get",
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.py_object),
     )
-    # The base classes of the wrappers: core reads and makes instances itself.
-    _python_type = _bind("nrn_python_type", ctypes.py_object, ctypes.c_char_p)
-    OBJECT_BASE = _python_type(b"object")
-    SECTION_BASE = _python_type(b"section")
-    SEGMENT_BASE = _python_type(b"segment")
-    # Fast-path base classes (prototype): None on a core without them.
-    MECHANISM_BASE = _python_type(b"mechanism")
-    VECTOR_BASE = _python_type(b"vector")
+    _Py_IncRef = ctypes.PYFUNCTYPE(None, ctypes.py_object)(
+        ("Py_IncRef", ctypes.pythonapi)
+    )
+
+    def _new_python_object(value):
+        """A PythonObject with one reference, the caller's. It holds a reference
+        to value, which the release hook gives back."""
+        _Py_IncRef(value)
+        return _python_object_new(id(value))
+
+    def _python_object_get(obj):
+        """What a PythonObject holds: __main__ for HOC's new PythonObject()."""
+        held = ctypes.py_object()
+        _python_object_payload(obj, ctypes.byref(held))
+        try:
+            return held.value
+        except ValueError:  # NULL
+            return sys.modules["__main__"]
+
+    from ._bases import (
+        MECHANISM_BASE,
+        OBJECT_BASE,
+        SECTION_BASE,
+        SEGMENT_BASE,
+        VECTOR_BASE,
+    )
+
     # NEURON is at its top level whenever it runs Python, so this is always HOC's
     # own top-level symbol.
     _top_level_symbol = _bind("nrn_symbol", ctypes.c_void_p, ctypes.c_char_p)

@@ -20,12 +20,13 @@ import operator
 import os
 import pickle
 import sys
-import threading
 import traceback
 
 from . import _coreneuron
 from .api import (
     CALLS_PYTHON,
+    libnrniv,
+    EPOCH,
     HOC_LOCK,
     OBJECT_BASE,
     SECTION_BASE,
@@ -50,6 +51,7 @@ from .api import (
     _nrn_stack_type,
     _nrn_str_pop0,
     _nrn_str_push,
+    _nrn_vector_data,
 )
 from .nrnref import reference
 from .sections import Segment, _section_for
@@ -71,6 +73,21 @@ if CALLS_PYTHON:
     )
     _bytes_set = _bind("nrn_bytes_set", None, c_void_p, c_void_p, c_size_t)
     _is_returned = _bind("nrn_hoc_error_is_returned", c_int)
+    # Its own function object: api.py's has argtypes of its own.
+    _payload_of = ctypes.PYFUNCTYPE(c_int, c_void_p, ctypes.POINTER(c_void_p))(
+        ("nrn_python_object_get", libnrniv)
+    )
+_Py_IncRef = ctypes.PYFUNCTYPE(None, py_object)(("Py_IncRef", ctypes.pythonapi))
+_Py_DecRef = ctypes.PYFUNCTYPE(None, c_void_p)(("Py_DecRef", ctypes.pythonapi))
+_cast = ctypes.cast
+try:  # the object at an address: a third of ctypes.cast(p, py_object).value
+    _object_at = ctypes.PYFUNCTYPE(py_object, c_void_p)(("Py_NewRef", ctypes.pythonapi))
+except AttributeError:  # Python 3.9
+
+    def _object_at(p):
+        return _cast(p, py_object).value
+
+
 _PyMapping_Check = ctypes.PYFUNCTYPE(c_int, py_object)(
     ("PyMapping_Check", ctypes.pythonapi)
 )
@@ -231,7 +248,7 @@ def _error_traceback(exc, message, err, size):
 
 def _payload(p):
     """What a PythonObject holds, from its this_pointer: __main__ for NULL."""
-    return sys.modules["__main__"] if not p else ctypes.cast(p, py_object).value
+    return sys.modules["__main__"] if not p else _object_at(p)
 
 
 def _to_python(obj):
@@ -417,6 +434,7 @@ def _key():
 
 @_hook("component", c_int, c_void_p, c_void_p, c_char_p, c_int, c_int, *ERR)
 def component(obj, held, sym_name, nindex, isfunc, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
     name = _names.get(sym_name)
     if name is None:
         name = _names[sym_name] = sys.intern(sym_name.decode("utf-8"))
@@ -442,7 +460,9 @@ def component(obj, held, sym_name, nindex, isfunc, err, size):
                 # HOC then reports as its own error.
                 print_exception(exc)
                 return 1
-            return _error_traceback(exc, "PyObject method call failed: " + name, err, size)
+            return _error_traceback(
+                exc, "PyObject method call failed: " + name, err, size
+            )
     elif nindex:
         try:
             _check_dimension(_nrn_int_pop())
@@ -467,6 +487,7 @@ def component(obj, held, sym_name, nindex, isfunc, err, size):
 
 @_hook("component_assign", c_int, c_void_p, c_void_p, *ERR)
 def component_assign(obj, held, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
     try:
         value = _pop()
     except _HocError as exc:
@@ -496,34 +517,44 @@ def component_assign(obj, held, err, size):
         else:
             setattr(payload, name, value)
     except BaseException as exc:
-        return _error_printed(_strip(exc), "Assignment to PythonObject failed", err, size)
+        return _error_printed(
+            _strip(exc), "Assignment to PythonObject failed", err, size
+        )
     return 1
 
 
-@_hook("to_python", c_int, c_void_p, ctypes.POINTER(c_void_p), *ERR)
-def to_python(obj, result, err, size):
+@_hook("to_number", c_int, c_void_p, ctypes.POINTER(c_double))
+def to_number(obj, x):
+    """A HOC object as a number, for the GUI: 0 if it is none."""
     try:
-        value = _to_python(obj)
-    except BaseException as exc:
-        return _fail_hook(_strip(exc), err, size)
-    ctypes.pythonapi.Py_IncRef(py_object(value))
-    result[0] = id(value)
-    return 1
-
-
-@_hook("to_number", c_int, py_object, ctypes.POINTER(c_double))
-def to_number(value, x):
-    try:
-        x[0] = float(value)
+        x[0] = float(_to_python(obj))
     except BaseException:
         return 0
     return 1
 
 
-@_hook("operator", c_int, py_object, c_char_p, c_void_p, c_int, c_double, *ERR)
+@_hook("release", None, c_void_p)
+def release(held):
+    """A PythonObject goes: the reference _new_python_object gave it."""
+    EPOCH[0] = None  # a __del__ may run
+    _Py_DecRef(held)
+
+
+@_hook("hold", c_int, c_void_p, ctypes.POINTER(c_void_p))
+def hold(held, result):
+    """A new reference to what a PythonObject holds, for NEURON to keep (PlotShape)."""
+    value = _payload(held)
+    _Py_IncRef(value)
+    result[0] = id(value)
+    return 1
+
+
+@_hook("operator", c_int, c_void_p, c_char_p, c_void_p, c_int, c_double, *ERR)
 def operator_(payload, method, other, is_number, x, err, size):
     """HOC's operators try a Python object's method first: 1 when it pushed the
     result, 2 to leave the operator to HOC."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    payload = _payload(payload)
     if is_number:
         # A whole number is an int: rxd's coefficients tell them apart.
         arg = int(x) if x == math.floor(x) and abs(x) < 9e18 else x
@@ -555,6 +586,7 @@ def operator_(payload, method, other, is_number, x, err, size):
 @_hook("statement", c_int, c_char_p, ctypes.POINTER(c_int), *ERR)
 def statement(text, ok, err, size):
     """nrnpython(): run statements in __main__; 0 only for SystemExit."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
     try:
         code = compile(text, "<string>", "exec")
         exec(code, sys.modules["__main__"].__dict__)
@@ -568,24 +600,6 @@ def statement(text, ok, err, size):
     return 1
 
 
-@_hook("callback_failed", c_int, c_int, py_object, *ERR)
-def callback_failed(kind, exc, err, size):
-    """hoccommand_exec (0), Vector.apply's call (1) or conversion (2) failed in
-    NEURON's C callbacks. 1: printed, the run goes on."""
-    if kind == 0:
-        return _fail_callback(
-            exc, "Python Callback failed [hoccommand_exec]:", err, size, True
-        )
-    message = (
-        "Python function call raised exception"
-        if kind == 1
-        else "Failed to convert result to float"
-    )
-    # As NEURON's nrnpy_call_func: any exception, an interrupt and SystemExit too,
-    # is only the HOC error; nothing is printed.
-    return _fail(exc, message, ALWAYS, err, size, False)
-
-
 def _call_command(command):
     """A callable, or (callable, arguments), or (callable, argument)."""
     if isinstance(command, tuple):
@@ -594,19 +608,66 @@ def _call_command(command):
     return command()
 
 
-@_hook("call_string", c_int, py_object, c_void_p, *ERR)
+@_hook("command", c_int, c_void_p, *ERR)
+def command(held, err, size):
+    """hoccommand_exec, per event (NetCon.record, CVode.event, ...): 2 when it
+    failed and that was only printed."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    try:
+        _call_command(_payload(held))
+    except BaseException as exc:
+        message = "Python Callback failed [hoccommand_exec]:"
+        return 2 if _fail_callback(_strip(exc), message, err, size, True) else 0
+    return 1
+
+
+@_hook("apply", c_int, c_void_p, c_void_p, c_int, c_int, *ERR)
+def apply(held, vec, start, end, err, size):
+    """Vector.apply: each element from start to end becomes f(element). As
+    NEURON's nrnpy_call_func, any exception of the call or of the conversion,
+    an interrupt and SystemExit too, is only the HOC error."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    f = _payload(held)
+    if not callable(f):
+        _write(err, size, "Object is not callable")
+        return 0
+    for i in range(start, end + 1):
+        try:
+            result = f(_nrn_vector_data(vec)[i])
+        except BaseException as exc:
+            message = "Python function call raised exception"
+            return _fail(_strip(exc), message, ALWAYS, err, size, False)
+        if not _PyNumber_Check(result):
+            _write(err, size, "Expected a numeric result from Python function")
+            return 0
+        try:
+            value = float(result)
+        except BaseException as exc:
+            message = "Failed to convert result to float"
+            return _fail(_strip(exc), message, ALWAYS, err, size, False)
+        _nrn_vector_data(vec)[i] = value  # f may have resized it
+    return 1
+
+
+@_hook("call_string", c_int, c_void_p, c_void_p, *ERR)
 def call_string(payload, out, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    payload = _payload(payload)
     try:
         result = _call_command(payload)
     except BaseException as exc:
-        return 2 if _fail_callback(_strip(exc), "Python Callback failed", err, size) else 0
+        return (
+            2 if _fail_callback(_strip(exc), "Python Callback failed", err, size) else 0
+        )
     _bytes(out, str(result).encode("utf-8", "replace"))
     return 1
 
 
-@_hook("call_number", c_int, py_object, c_int, c_int, ctypes.POINTER(c_double), *ERR)
+@_hook("call_number", c_int, c_void_p, c_int, c_int, ctypes.POINTER(c_double), *ERR)
 def call_number(payload, narg, report, x, err, size):
     """2: it failed, and the failure is only for the caller to know."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    payload = _payload(payload)
     try:
         args = _pop_arguments(narg)
     except _HocError as exc:
@@ -627,9 +688,11 @@ def call_number(payload, narg, report, x, err, size):
 _vector_wrappers = {}
 
 
-@_hook("praxis", c_int, py_object, c_void_p, ctypes.POINTER(c_double), *ERR)
+@_hook("praxis", c_int, c_void_p, c_void_p, ctypes.POINTER(c_double), *ERR)
 def praxis(payload, vec, x, err, size):
     """3: float() of the result failed, which is no HOC error."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    payload = _payload(payload)
     try:
         result = payload(_to_python(vec))
     except BaseException as exc:
@@ -638,7 +701,9 @@ def praxis(payload, vec, x, err, size):
             print_exception(exc)
             x[0] = 1e9
             return 1
-        return _fail(exc, "Call of Python Callable failed in praxis_efun", HOC_ERROR, err, size)
+        return _fail(
+            exc, "Call of Python Callable failed in praxis_efun", HOC_ERROR, err, size
+        )
     try:
         x[0] = float(result)
     except BaseException as exc:
@@ -649,8 +714,10 @@ def praxis(payload, vec, x, err, size):
     return 1
 
 
-@_hook("bind_arguments", c_int, py_object, c_int, ctypes.POINTER(c_void_p), *ERR)
+@_hook("bind_arguments", c_int, c_void_p, c_int, ctypes.POINTER(c_void_p), *ERR)
 def bind_arguments(payload, narg, result, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    payload = _payload(payload)
     try:
         args = _pop_arguments(narg)
     except _HocError as exc:
@@ -662,8 +729,10 @@ def bind_arguments(payload, narg, result, err, size):
     return 1
 
 
-@_hook("call_with_section", c_int, py_object, c_void_p, *ERR)
+@_hook("call_with_section", c_int, c_void_p, c_void_p, *ERR)
 def call_with_section(payload, sec, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    payload = _payload(payload)
     try:
         section = _section_for(sec)
     except BaseException as exc:
@@ -675,8 +744,10 @@ def call_with_section(payload, sec, err, size):
     return 1
 
 
-@_hook("command_tool", c_int, py_object, c_int, c_double, c_double, c_int, *ERR)
+@_hook("command_tool", c_int, c_void_p, c_int, c_double, c_double, c_int, *ERR)
 def command_tool(payload, type_, x, y, key, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    payload = _payload(payload)
     try:
         payload(type_, x, y, key)
     except BaseException as exc:
@@ -694,8 +765,10 @@ def _is_item(target, key):
     return bool(_PySequence_Check(target) or _PyMapping_Check(target))
 
 
-@_hook("variable_get", c_int, py_object, ctypes.POINTER(c_double), *ERR)
+@_hook("variable_get", c_int, c_void_p, ctypes.POINTER(c_double), *ERR)
 def variable_get(payload, x, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    payload = _payload(payload)
     try:
         target, key = payload[0], payload[1]
         value = target[key] if _is_item(target, key) else getattr(target, key)
@@ -708,8 +781,10 @@ def variable_get(payload, x, err, size):
     return 1
 
 
-@_hook("variable_set", c_int, py_object, c_double, *ERR)
+@_hook("variable_set", c_int, c_void_p, c_double, *ERR)
 def variable_set(payload, x, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    payload = _payload(payload)
     try:
         target, key = payload[0], payload[1]
         if _is_item(target, key):
@@ -721,8 +796,10 @@ def variable_set(payload, x, err, size):
     return 1
 
 
-@_hook("variable_string", c_int, py_object, c_void_p, *ERR)
+@_hook("variable_string", c_int, c_void_p, c_void_p, *ERR)
 def variable_string(payload, out, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    payload = _payload(payload)
     try:
         target, key = payload[0], payload[1]
         value = getattr(target, key)
@@ -775,6 +852,7 @@ def gui_call(
     callback (obj, a PythonObject, or NULL). The arguments of the HOC call are on
     the stack; bit i of pointers is set if argument i + 1 is a Pointer to a
     pointer argument."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
     if name is None:
         _gui[0] = _to_python(obj) if obj else None
         return 1
@@ -815,7 +893,7 @@ _NOT_LOCATION = (
 @_hook(
     "location",
     c_int,
-    py_object,
+    c_void_p,
     c_int,
     ctypes.POINTER(c_void_p),
     ctypes.POINTER(c_double),
@@ -823,6 +901,8 @@ _NOT_LOCATION = (
 )
 def location(payload, kind, sec, x, err, size):
     """kind: 0 a section, 1 a segment, 2 a segment or what has one (rxd's node)."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    payload = _payload(payload)
     try:
         if kind == 0:
             sec[0] = _sec_address(payload) if isinstance(payload, SECTION_BASE) else 0
@@ -870,6 +950,7 @@ def is_segment(payload):
 
 @_hook("segment_new", c_int, c_void_p, c_double, ctypes.POINTER(c_void_p), *ERR)
 def segment_new(sec, x, result, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
     try:
         result[0] = _new_python_object(Segment(_section_for(sec), x))
     except BaseException as exc:
@@ -877,10 +958,12 @@ def segment_new(sec, x, result, err, size):
     return 1
 
 
-@_hook("sections", c_int, py_object, c_void_p, *ERR)
+@_hook("sections", c_int, c_void_p, c_void_p, *ERR)
 def sections(payload, out, err, size):
     """The sections of an iterable, also those before a failure (NEURON appends
     them first)."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    payload = _payload(payload)
     try:
         iterator = iter(payload)
     except Exception:
@@ -899,9 +982,61 @@ def sections(payload, out, err, size):
                 break
             addresses.append(address)
     except BaseException as exc:
-        status = _fail(_strip(exc), "argument must be a Python iterable", EXCEPTION, err, size)
+        status = _fail(
+            _strip(exc), "argument must be a Python iterable", EXCEPTION, err, size
+        )
     _bytes(out, (c_void_p * len(addresses))(*addresses))
     return status
+
+
+# The names and cells of the sections Python made: the owner is the Section,
+# which may be on its way out (no reference is taken to it here).
+
+
+def _owner(owner, slot):
+    try:  # also a Section of this interface imported before
+        return object.__getattribute__(_object_at(owner), slot)
+    except AttributeError:
+        return None
+
+
+@_hook("section_name", c_int, c_void_p, c_void_p)
+def section_name(owner, out):
+    """0: it has none, and is __nrnsec_<address>."""
+    name = _owner(owner, "_name")
+    if name is None:
+        return 0
+    _bytes(out, name)
+    return 1
+
+
+def _cell(owner):
+    weak = _owner(owner, "_cell")
+    try:
+        return None if weak is None else weak()
+    except Exception:
+        return None
+
+
+@_hook("section_cell", c_int, c_void_p, ctypes.POINTER(c_void_p))
+def section_cell(owner, result):
+    try:
+        result[0] = to_hoc(_cell(owner)) or None
+    except BaseException as exc:
+        print_exception(_strip(exc))
+        return 0
+    return 1
+
+
+@_hook("section_cell_equals", c_int, c_void_p, c_void_p)
+def section_cell_equals(owner, obj):
+    cell = _cell(owner)
+    if isinstance(cell, OBJECT_BASE):
+        return int(_wrapped(cell) == (obj or 0))
+    if not obj:
+        return int(cell is None)
+    held = c_void_p()
+    return int(bool(_payload_of(obj, ctypes.byref(held))) and held.value == id(cell))
 
 
 # ---- Vector
@@ -922,9 +1057,11 @@ def _array_interface(source):
         return None
 
 
-@_hook("numbers", c_int, c_char_p, py_object, c_void_p, *ERR)
+@_hook("numbers", c_int, c_char_p, c_void_p, c_void_p, *ERR)
 def numbers(name, source, out, err, size):
     """Vector.from_python: the doubles of a sequence or an iterable."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    source = _payload(source)
     try:
         if not _PySequence_Check(source):
             try:
@@ -985,6 +1122,7 @@ def numbers(name, source, out, err, size):
 )
 def vector_to_python(data, n, name, held, result, err, size):
     """Vector.to_python: a new list, or into the sequence a PythonObject holds."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
     if not held:
         result[0] = _new_python_object(data[:n])
         return 1
@@ -1025,6 +1163,7 @@ def vector_to_python(data, n, name, held, result, err, size):
 @_hook("vector_as_numpy", c_int, c_void_p, c_size_t, ctypes.POINTER(c_void_p), *ERR)
 def vector_as_numpy(data, n, result, err, size):
     """The array shares the Vector's data."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
     try:
         import numpy
         import numpy.ctypeslib
@@ -1051,8 +1190,10 @@ def _pickling_failed(exc, keep=False):
     return 3
 
 
-@_hook("pickle", c_int, py_object, c_void_p, *ERR)
+@_hook("pickle", c_int, c_void_p, c_void_p, *ERR)
 def pickle_(payload, out, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    payload = _payload(payload)
     try:
         data = pickle.dumps(payload)
     except BaseException as exc:
@@ -1063,6 +1204,7 @@ def pickle_(payload, out, err, size):
 
 @_hook("unpickle", c_int, c_void_p, c_size_t, ctypes.POINTER(c_void_p), *ERR)
 def unpickle(data, n, result, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
     try:
         value = pickle.loads(ctypes.string_at(data, n))
     except BaseException as exc:
@@ -1073,6 +1215,7 @@ def unpickle(data, n, result, err, size):
 
 @_hook("call_pickled", c_int, c_void_p, c_size_t, c_int, c_void_p, *ERR)
 def call_pickled(data, n, narg, out, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
     try:
         f = pickle.loads(ctypes.string_at(data, n))
     except BaseException as exc:
@@ -1168,7 +1311,9 @@ def _collective(kind, size, source):
         chunks = _items(source)
         if size < 0:  # only the numbers of bytes to be sent and received
             received = n.Vector()
-            pc.alltoall(n.Vector([len(c) for c in chunks]), n.Vector(nhost, 1), received)
+            pc.alltoall(
+                n.Vector([len(c) for c in chunks]), n.Vector(nhost, 1), received
+            )
             return (sum(len(c) for c in chunks), int(sum(received)))
         return [_loads(c) for c in _exchange(pc, chunks)]
     if kind == 2:
@@ -1192,6 +1337,7 @@ def collective(kind, size, pointer, result, err, errsize):
     argument if pointer). size is the root rank for 3, 4 and 5; for 1, a negative
     size asks for the numbers of bytes only. 3: pickling failed, as NEURON's
     "Python exception"."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
     try:
         source = _gui_argument(False, pointer)
     except BaseException as exc:
@@ -1234,6 +1380,7 @@ def set_rvp_converter(converter):
 
 @_hook("savestate_store", c_int, c_void_p, *ERR)
 def savestate_store(out, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
     store = _savestate[0]
     if store is None:
         return 2
@@ -1243,20 +1390,25 @@ def savestate_store(out, err, size):
             raise TypeError(f"cannot convert '{type(state).__name__}' object to bytes")
         data = bytes(state)
     except BaseException as exc:
-        return _fail(_strip(exc), "SaveState: Data store failure.", HOC_ERROR, err, size)
+        return _fail(
+            _strip(exc), "SaveState: Data store failure.", HOC_ERROR, err, size
+        )
     _bytes(out, data)
     return 1
 
 
 @_hook("savestate_restore", c_int, c_void_p, c_size_t, *ERR)
 def savestate_restore(data, n, err, size):
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
     restore = _savestate[1]
     if restore is None:
         return 2
     try:
         restore(bytearray(ctypes.string_at(data, n)))
     except BaseException as exc:
-        return _fail(_strip(exc), "SaveState: Data restore failure.", HOC_ERROR, err, size)
+        return _fail(
+            _strip(exc), "SaveState: Data restore failure.", HOC_ERROR, err, size
+        )
     return 1
 
 
@@ -1264,8 +1416,11 @@ def savestate_restore(data, n, err, size):
 def coreneuron_option(which, value):
     """CoreNEURON's options are read while the simulator is set up: an error is
     printed, and the option is -1."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
     try:
-        option = (_coreneuron.enable_value if which == 0 else _coreneuron.file_mode_value)()
+        option = (
+            _coreneuron.enable_value if which == 0 else _coreneuron.file_mode_value
+        )()
         value[0] = operator.index(option)
     except BaseException as exc:
         print_exception(_strip(exc))
@@ -1277,6 +1432,7 @@ def coreneuron_option(which, value):
 @_hook("coreneuron_arg", c_int, c_double, c_void_p)
 def coreneuron_arg(tstop, out):
     """0: no arguments."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
     try:
         arg = _coreneuron.nrncore_arg(tstop)
     except BaseException as exc:
@@ -1288,9 +1444,11 @@ def coreneuron_arg(tstop, out):
     return 1
 
 
-@_hook("rvp_callable", c_int, py_object, ctypes.POINTER(c_void_p), *ERR)
+@_hook("rvp_callable", c_int, c_void_p, ctypes.POINTER(c_void_p), *ERR)
 def rvp_callable(payload, result, err, size):
     """2: plot the object itself."""
+    EPOCH[0] = None  # NEURON calls Python: HOC may have changed the model
+    payload = _payload(payload)
     converter = _rvp[0]
     if converter is None:
         return 2
@@ -1305,14 +1463,14 @@ def rvp_callable(payload, result, err, size):
     return 1
 
 
-# ---- Windows: the thread that waits for the GUI's releases the HOC lock as
-# often as it holds it, and takes it as often again.
+# ---- Windows: a thread that waits for the GUI's, which calls Python and HOC,
+# releases the HOC lock as often as it holds it, and the GIL, and takes them again.
 
-_waiting = threading.local()
+_WAIT = ctypes.CFUNCTYPE(None, c_void_p)  # not a PYFUNCTYPE: the call releases the GIL
 
 
-@_hook("wait_begin", None)
-def wait_begin():
+@_hook("wait", None, c_void_p, c_void_p)
+def wait(function, arg):
     count = 0
     while True:
         try:
@@ -1320,14 +1478,11 @@ def wait_begin():
         except RuntimeError:  # it does not hold the lock any more
             break
         count += 1
-    _waiting.count = count
-
-
-@_hook("wait_end", None)
-def wait_end():
-    for _ in range(getattr(_waiting, "count", 0)):
-        HOC_LOCK.acquire()
-    _waiting.count = 0
+    try:
+        _WAIT(function)(arg)
+    finally:
+        for _ in range(count):
+            HOC_LOCK.acquire()
 
 
 def install():
